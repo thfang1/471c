@@ -17,27 +17,65 @@ def eliminate_letrec_term(
 
     match term:
         case L3.Let(bindings=bindings, body=body):
-            pass
+            new_bindings = [(name, recur(val)) for name, val in bindings]           
+            new_ctx = {**context}
+            for name, _ in bindings:
+                new_ctx.pop(name, None) 
+            
+            return L2.Let(
+                bindings=new_bindings,
+                body=recur(body, new_ctx)
+            )
 
         case L3.LetRec(bindings=bindings, body=body):
-            pass
+            local_rec_names = [name for name, _ in bindings]
+            new_ctx = {**context, **dict.fromkeys(local_rec_names, None)}
+
+           
+            box_bindings = [(name, L2.Allocate(count=1)) for name in local_rec_names]
+
+            init_effects = [
+                L2.Store(base=L2.Reference(name=name), index=0, value=recur(val, new_ctx))
+                for name, val in bindings
+            ]
+
+            return L2.Let(
+                bindings=box_bindings,
+                body=L2.Begin(
+                    effects=init_effects,
+                    value=recur(body, new_ctx)
+                )
+            )
 
         case L3.Reference(name=name):
             # if name is a recursive variable -> (Load (Reference name)))
             # else (Reference name)
-            pass
+            if name in context:
+                return L2.Load(base=L2.Reference(name=name), index=0)
+            return L2.Reference(name=name)
 
         case L3.Abstract(parameters=parameters, body=body):
-            pass
+            new_ctx = {name: context[name] for name in context if name not in parameters}
+            return L2.Abstract(
+                parameters=parameters,
+                body=recur(body, new_ctx)
+            )
 
         case L3.Apply(target=target, arguments=arguments):
-            pass
+            return L2.Apply(
+                target=recur(target),
+                arguments=[recur(arg) for arg in arguments]
+            )
 
         case L3.Immediate(value=value):
             return L2.Immediate(value=value)
 
-        case L3.Primitive(operator=_operator, left=left, right=right):
-            pass
+        case L3.Primitive(operator=operator, left=left, right=right):
+            return L2.Primitive(
+                operator=operator,
+                left=recur(left),
+                right=recur(right)
+            )
 
         case L3.Branch(operator=operator, left=left, right=right, consequent=consequent, otherwise=otherwise):
             return L2.Branch(
@@ -57,11 +95,18 @@ def eliminate_letrec_term(
                 index=index,
             )
 
-        case L3.Store(base=base, index=_index, value=value):
-            pass
+        case L3.Store(base=base, index=index, value=value):
+            return L2.Store(
+                base=recur(base),
+                index=index,
+                value=recur(value),
+            )
 
         case L3.Begin(effects=effects, value=value):  # pragma: no branch
-            pass
+            return L2.Begin(
+                effects=[recur(e) for e in effects],
+                value=recur(value),
+            )
 
 
 def eliminate_letrec_program(
