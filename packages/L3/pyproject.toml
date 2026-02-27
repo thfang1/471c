@@ -5,11 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 authors = [{ name = "James Clause", email = "clause@udel.edu" }]
 requires-python = ">=3.14"
-dependencies = ["click>=8.3.1", "pydantic>=2.12.3", "util"]
-
+dependencies = ["click>=8.3.1", "pydantic>=2.12.3", "lark>=1.3.1", "util"]
 
 [tool.uv]
 package = true
 
 [project.scripts]
-L3 = "L3:main.main"
+l3 = "L3.main:main"
