@@ -181,4 +181,4 @@ def test_eliminate_apply_and_primitive_recursive_in_lambda():
 
     actual = eliminate_letrec_term(term, {})
 
-    assert actual == expected    assert actual == expected
+    assert actual == expected

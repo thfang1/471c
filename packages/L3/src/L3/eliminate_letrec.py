@@ -113,7 +113,7 @@ def eliminate_letrec_program(
     program: L3.Program,
 ) -> L2.Program:
     match program:
-        case L3.Program(parameters=parameters, body=body):  # pragma: no branch
+        case L3.Program(parameters=parameters, body=body):  
             return L2.Program(
                 parameters=parameters,
                 body=eliminate_letrec_term(body, {}),
