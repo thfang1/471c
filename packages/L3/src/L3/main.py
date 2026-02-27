@@ -1,10 +1,11 @@
 from pathlib import Path
 
 import click
+from L2.to_python import to_ast_program
 
 from .check import check_program
-from .syntax import Program
-from .to_python import to_ast_program
+from .eliminate_letrec import eliminate_letrec_program
+from .parse import parse_program
 
 
 @click.command(
@@ -30,12 +31,18 @@ from .to_python import to_ast_program
     "input",
     type=click.Path(exists=True, readable=True, dir_okay=False, path_type=Path),
 )
-def main(output: Path | None, check: bool, input: Path):
-    program = Program.model_validate_json(input.read_text())
+def main(
+    output: Path | None,
+    check: bool,
+    input: Path,
+) -> None:
+    l3 = parse_program(input.read_text())
 
     if check:
-        check_program(program)
+        check_program(l3)
 
-    module = to_ast_program(program)
+    l2 = eliminate_letrec_program(l3)
+
+    module = to_ast_program(l2)
 
     (output or input.with_suffix(".py")).write_text(module)

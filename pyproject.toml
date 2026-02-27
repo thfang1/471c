@@ -5,6 +5,7 @@ description = "Add your description here"
 authors = [{ name = "James Clause", email = "clause@udel.edu" }]
 readme = "README.md"
 requires-python = ">=3.14"
+dependencies = []
 
 [dependency-groups]
 dev = [
@@ -24,11 +25,11 @@ line-length = 120
 members = ["packages/*"]
 
 [tool.uv.sources]
-L0 = { workspace = true }
-L1 = { workspace = true }
-L2 = { workspace = true }
-L3 = { workspace = true }
 util = { workspace = true }
+l3 = { workspace = true }
+l2 = { workspace = true }
+l1 = { workspace = true }
+l0 = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = [

@@ -1,0 +1,30 @@
+program     : "(" PROGRAM "(" parameters ")" term ")"
+parameters  : IDENTIFIER*
+
+term        : let
+            | letrec
+            | reference
+            | abstract
+            | apply
+            | immediate
+            | primitive
+            | branch
+            | allocate
+            | load
+            | store
+            | begin
+
+
+let         : "(" LET "(" bindings ")" term ")"
+
+letrec      : "(" LETREC "(" bindings ")" term ")"
+
+bindings    : binding*
+binding     : IDENTIFIER term
+
+PROGRAM.2   : "l3"
+LET.2       : "let"
+LETREC.2    : "letrec"
+LAMBDA.2    : "\\" | "lambda" | "λ"
+
+IDENTIFIER  : /[a-zA-Z_][a-zA-Z0-9_]*/
