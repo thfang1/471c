@@ -1,0 +1,8 @@
+(l2 (n)
+    (let ((fact (allocate 1)))
+        (begin
+            (store fact 0 (\ (n)
+                 (if (== n 0)
+                     1
+                     (* n ((load fact 0) (- n 1))))))
+            ((load fact 0) 5))))
