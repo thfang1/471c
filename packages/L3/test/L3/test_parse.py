@@ -1,19 +1,6 @@
 from L3.parse import parse_program, parse_term
-from L3.syntax import (
-    Abstract,
-    Allocate,
-    Apply,
-    Begin,
-    Branch,
-    Immediate,
-    Let,
-    LetRec,
-    Load,
-    Primitive,
-    Program,
-    Reference,
-    Store,
-)
+from L3.syntax import (Abstract, Allocate, Apply, Begin, Branch, Immediate,
+                       Let, LetRec, Load, Primitive, Program, Reference, Store)
 
 
 # Let
@@ -44,6 +31,20 @@ def test_parse_let_bindings():
 
     assert actual == expected
 
+def test_parse_let_multiple_bindings():
+    source = "(let ((x 0) (y 1)) x)"
+
+    expected = Let(
+        bindings=[
+            ("x", Immediate(value=0)),
+            ("y", Immediate(value=1)),
+        ],
+        body=Reference(name="x"),
+    )
+
+    actual = parse_term(source)
+
+    assert actual == expected
 
 # LetRec
 def test_parse_letrec_empty():
@@ -100,6 +101,17 @@ def test_parse_abstract():
 
     assert actual == expected
 
+def test_parse_abstract_multiple_parameters():
+    source = "(lambda (x y) x)"
+
+    expected = Abstract(
+        parameters=["x", "y"],
+        body=Reference(name="x"),
+    )
+
+    actual = parse_term(source)
+
+    assert actual == expected
 
 # Apply
 def test_parse_apply_empty():
@@ -127,6 +139,20 @@ def test_parse_apply_arguments():
 
     assert actual == expected
 
+def test_parse_apply_nested():
+    source = "((lambda (x) x) 5)"
+
+    expected = Apply(
+        target=Abstract(
+            parameters=["x"],
+            body=Reference(name="x"),
+        ),
+        arguments=[Immediate(value=5)],
+    )
+
+    actual = parse_term(source)
+
+    assert actual == expected
 
 # Immediate
 def test_parse_immediate():
@@ -138,6 +164,14 @@ def test_parse_immediate():
 
     assert actual == expected
 
+def test_parse_immediate_negative():
+    source = "-7"
+
+    expected = Immediate(value=-7)
+
+    actual = parse_term(source)
+
+    assert actual == expected
 
 # Primitive
 def test_parse_add():
@@ -290,6 +324,22 @@ def test_parse_program_identity():
     expected = Program(
         parameters=["x"],
         body=Reference(name="x"),
+    )
+
+    actual = parse_program(source)
+
+    assert actual == expected
+
+def test_parse_program_multiple_parameters():
+    source = "(l3 (x y) (+ x y))"
+
+    expected = Program(
+        parameters=["x", "y"],
+        body=Primitive(
+            operator="+",
+            left=Reference(name="x"),
+            right=Reference(name="y"),
+        ),
     )
 
     actual = parse_program(source)

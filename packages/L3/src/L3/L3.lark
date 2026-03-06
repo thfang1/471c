@@ -20,11 +20,47 @@ let         : "(" LET "(" bindings ")" term ")"
 letrec      : "(" LETREC "(" bindings ")" term ")"
 
 bindings    : binding*
-binding     : IDENTIFIER term
+binding     : "(" IDENTIFIER term ")"
+
+reference   : IDENTIFIER
+
+abstract    : "(" LAMBDA "(" parameters ")" term ")"
+
+apply       : "(" term term* ")"
+
+immediate   : INTEGER
+
+primitive   : "(" PRIMITIVE term term ")"
+
+branch      : "(" IF comparison term term ")"
+comparison  : "(" COMPARE term term ")"
+
+allocate    : "(" ALLOCATE NAT ")"
+
+load        : "(" LOAD term NAT ")"
+
+store       : "(" STORE term NAT term ")"
+
+begin       : "(" BEGIN term+ ")"
+
 
 PROGRAM.2   : "l3"
 LET.2       : "let"
 LETREC.2    : "letrec"
 LAMBDA.2    : "\\" | "lambda" | "λ"
+IF.2        : "if"
+ALLOCATE.2  : "allocate"
+LOAD.2      : "load"
+STORE.2     : "store"
+BEGIN.2     : "begin"
+
+PRIMITIVE.2 : "+" | "-" | "*"
+COMPARE.2   : "<" | "=="
+
+NAT         : "0" | /[1-9][0-9]*/
+INTEGER     : "0" | /-?[1-9][0-9]*/
 
 IDENTIFIER  : /[a-zA-Z_][a-zA-Z0-9_]*/
+
+%import common.WS
+%ignore WS
