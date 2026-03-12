@@ -1,11 +1,14 @@
 from pathlib import Path
 
 import click
-from L2.to_python import to_ast_program
+from L1.to_python import to_ast_program
+from L2.cps_convert import cps_convert_program
+from L2.optimize import optimize_program
 
 from .check import check_program
 from .eliminate_letrec import eliminate_letrec_program
 from .parse import parse_program
+from .uniqify import uniqify_program
 
 
 @click.command(
@@ -21,6 +24,12 @@ from .parse import parse_program
     help="Enable or disable semantic analysis",
 )
 @click.option(
+    "--optimize/--no-optimize",
+    default=True,
+    show_default=True,
+    help="Enable or disable optimization",
+)
+@click.option(
     "-o",
     "--output",
     type=click.Path(writable=True, dir_okay=False, path_type=Path),
@@ -34,6 +43,7 @@ from .parse import parse_program
 def main(
     output: Path | None,
     check: bool,
+    optimize: bool,
     input: Path,
 ) -> None:
     l3 = parse_program(input.read_text())
@@ -41,8 +51,15 @@ def main(
     if check:
         check_program(l3)
 
+    fresh, l3 = uniqify_program(l3)
+
     l2 = eliminate_letrec_program(l3)
 
-    module = to_ast_program(l2)
+    if optimize:
+        l2 = optimize_program(l2)
+
+    l1 = cps_convert_program(l2, fresh)
+
+    module = to_ast_program(l1)
 
     (output or input.with_suffix(".py")).write_text(module)
