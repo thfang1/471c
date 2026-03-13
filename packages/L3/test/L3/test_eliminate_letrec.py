@@ -235,7 +235,7 @@ def test_eliminate_letrec_program():
 
     assert actual == expected
 
-@pytest.mark.skip
+
 def test_eliminate_letrec_term_creates_boxes_and_stores():
     # letrec f = f in f
     # After elimination:
@@ -271,7 +271,7 @@ def test_eliminate_letrec_term_creates_boxes_and_stores():
 
     assert actual == expected
 
-@pytest.mark.skip
+
 def test_eliminate_letrec_term_reference_not_recursive_stays_reference():
     term = L3.Reference(name="x")
     context: Context = {}  # x not recursive here
@@ -279,7 +279,7 @@ def test_eliminate_letrec_term_reference_not_recursive_stays_reference():
     actual = eliminate_letrec_term(term, context)
     assert actual == expected
 
-@pytest.mark.skip
+
 def test_eliminate_letrec_term_reference_recursive_becomes_load():
     term = L3.Reference(name="x")
     context: Context = {"x": None}  # mark as recursive variable
@@ -287,7 +287,7 @@ def test_eliminate_letrec_term_reference_recursive_becomes_load():
     actual = eliminate_letrec_term(term, context)
     assert actual == expected
 
-@pytest.mark.skip
+
 def test_eliminate_let_shadows_recursive_name_in_body():
     # context says "x is recursive" (should load), BUT Let binds x normally,
     # so in body, Reference("x") should stay Reference("x") (no load).
@@ -307,7 +307,7 @@ def test_eliminate_let_shadows_recursive_name_in_body():
 
     assert actual == expected
 
-@pytest.mark.skip
+
 def test_eliminate_abstract_shadows_recursive_parameter():
     # context says "x is recursive", BUT lambda parameter x shadows it,
     # so Reference("x") in body should remain Reference("x"), not Load.
@@ -327,7 +327,7 @@ def test_eliminate_abstract_shadows_recursive_parameter():
 
     assert actual == expected
 
-@pytest.mark.skip
+
 def test_eliminate_apply_and_primitive_recursive_in_lambda():
     # (letrec f = f in (lambda (x) -> f + x))(1)
     # f inside lambda should become Load(f,0)

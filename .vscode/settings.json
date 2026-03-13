@@ -9,5 +9,12 @@
     "editor.defaultFormatter": "charliermarsh.ruff"
   },
   "ruff.configuration": "pyproject.toml",
-  "python.analysis.typeCheckingMode": "strict"
+  "python.analysis.typeCheckingMode": "strict",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/packages/L0/src",
+    "${workspaceFolder}/packages/L1/src",    
+    "${workspaceFolder}/packages/L2/src",
+    "${workspaceFolder}/packages/L3/src",
+    "${workspaceFolder}/packages/util/src"
+  ]
 }

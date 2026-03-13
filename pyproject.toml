@@ -22,7 +22,7 @@ dev = [
 line-length = 120
 
 [tool.uv.workspace]
-members = ["packages/*"]
+members = ["packages/*", "util"]
 
 [tool.uv.sources]
 util = { workspace = true }

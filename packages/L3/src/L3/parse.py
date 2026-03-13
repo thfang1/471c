@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal, cast
 
 from lark import Lark, Token, Transformer
 from lark.visitors import v_args  # pyright: ignore[reportUnknownVariableType]
@@ -136,8 +137,9 @@ class AstTransformer(Transformer[Token, Program | Term | Identifier | int | tupl
         left: Term,
         right: Term,
     ) -> Term:
+        op_str = cast(Literal["+", "-", "*"], str(operator))
         return Primitive(
-            operator=str(operator),
+            operator=op_str,
             left=left,
             right=right,
         )
@@ -160,8 +162,9 @@ class AstTransformer(Transformer[Token, Program | Term | Identifier | int | tupl
         otherwise: Term,
     ) -> Term:
         operator, left, right = comparison
+        op_str = cast(Literal["<", "=="], operator)
         return Branch(
-            operator=operator,
+            operator=op_str,
             left=left,
             right=right,
             consequent=consequent,
@@ -202,16 +205,22 @@ class AstTransformer(Transformer[Token, Program | Term | Identifier | int | tupl
             index=index,
             value=value,
         )
+    
 
     def begin(
         self,
         children: Sequence[Token | Term],
     ) -> Term:
-        _begin, *terms = children
+        terms: list[Term] = [t for t in children if not isinstance(t, Token)]
+        
+        if not terms:
+            raise ValueError("Begin block must have at least one term")
+            
         return Begin(
-            effects=terms[:-1],
-            value=terms[-1],
+            effects=terms[:-1],  
+            value=terms[-1],     
         )
+    
 
 
 
@@ -227,4 +236,5 @@ def parse_program(source: str) -> Program:
     grammar = Path(__file__).with_name("L3.lark").read_text()
     parser = Lark(grammar, start="program")
     tree = parser.parse(source)  # pyright: ignore[reportUnknownMemberType]
+    return AstTransformer().transform(tree)  # pyright: ignore[reportReturnType]
     return AstTransformer().transform(tree)  # pyright: ignore[reportReturnType]

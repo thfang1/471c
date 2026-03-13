@@ -18,7 +18,7 @@ def eliminate_letrec_term(
     match term:
         case L3.Let(bindings=bindings, body=body):
             new_bindings = [(name, recur(val)) for name, val in bindings]           
-            new_ctx = {**context}
+            new_ctx : Context = dict(context)
             for name, _ in bindings:
                 new_ctx.pop(name, None) 
             
@@ -29,7 +29,7 @@ def eliminate_letrec_term(
 
         case L3.LetRec(bindings=bindings, body=body):
             local_rec_names = [name for name, _ in bindings]
-            new_ctx = {**context, **dict.fromkeys(local_rec_names, None)}
+            new_ctx : Context = {**context, **dict.fromkeys(local_rec_names, None)}
 
            
             box_bindings = [(name, L2.Allocate(count=1)) for name in local_rec_names]
