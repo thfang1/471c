@@ -10,9 +10,7 @@ def k(v: L1.Identifier) -> L1.Statement:
 
 def test_cps_convert_term_name():
     term = L2.Reference(name="x")
-
     fresh = SequentialNameGenerator()
-
     actual = cps_convert_term(term, k, fresh)
 
     expected = L1.Halt(value="x")
@@ -21,7 +19,6 @@ def test_cps_convert_term_name():
 
 def test_cps_convert_term_immediate():
     term = L2.Immediate(value=42)
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -30,7 +27,6 @@ def test_cps_convert_term_immediate():
         value=42,
         then=L1.Halt(value="t0"),
     )
-
     assert actual == expected
 
 
@@ -40,7 +36,6 @@ def test_cps_convert_term_primitive():
         left=L2.Reference(name="x"),
         right=L2.Reference(name="y"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -51,7 +46,6 @@ def test_cps_convert_term_primitive():
         right="y",
         then=L1.Halt(value="t0"),
     )
-
     assert actual == expected
 
 
@@ -63,7 +57,6 @@ def test_cps_convert_term_let():
         ],
         body=L2.Reference(name="b"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -76,7 +69,6 @@ def test_cps_convert_term_let():
             then=L1.Halt(value="b"),
         ),
     )
-
     assert actual == expected
 
 
@@ -85,7 +77,6 @@ def test_cps_convert_term_abstract():
         parameters=["x"],
         body=L2.Reference(name="x"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -95,18 +86,14 @@ def test_cps_convert_term_abstract():
         body=L1.Apply(target="k0", arguments=["x"]),
         then=L1.Halt(value="t0"),
     )
-
     assert actual == expected
 
 
 def test_cps_convert_term_apply():
     term = L2.Apply(
         target=L2.Reference(name="f"),
-        arguments=[
-            L2.Reference(name="y"),
-        ],
+        arguments=[L2.Reference(name="y")],
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -119,7 +106,6 @@ def test_cps_convert_term_apply():
             arguments=["y", "k0"],
         ),
     )
-
     assert actual == expected
 
 
@@ -131,7 +117,6 @@ def test_cps_convert_term_branch():
         consequent=L2.Reference(name="a"),
         otherwise=L2.Reference(name="b"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -143,23 +128,15 @@ def test_cps_convert_term_branch():
             operator="==",
             left="x",
             right="y",
-            then=L1.Apply(
-                target="j0",
-                arguments=["a"],
-            ),
-            otherwise=L1.Apply(
-                target="j0",
-                arguments=["b"],
-            ),
+            then=L1.Apply(target="j0", arguments=["a"]),
+            otherwise=L1.Apply(target="j0", arguments=["b"]),
         ),
     )
-
     assert actual == expected
 
 
 def test_cps_convert_term_allocate():
     term = L2.Allocate(count=0)
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -168,7 +145,6 @@ def test_cps_convert_term_allocate():
         count=0,
         then=L1.Halt(value="t0"),
     )
-
     assert actual == expected
 
 
@@ -177,7 +153,6 @@ def test_cps_convert_term_load():
         base=L2.Reference(name="x"),
         index=0,
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term_load, k, fresh)
 
@@ -187,7 +162,6 @@ def test_cps_convert_term_load():
         index=0,
         then=L1.Halt(value="t0"),
     )
-
     assert actual == expected
 
 
@@ -197,9 +171,9 @@ def test_cps_convert_term_store():
         index=0,
         value=L2.Reference(name="y"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
+
 
     expected = L1.Store(
         base="x",
@@ -211,18 +185,14 @@ def test_cps_convert_term_store():
             then=L1.Halt(value="t0"),
         ),
     )
-
     assert actual == expected
 
 
 def test_cps_convert_term_begin():
     term = L2.Begin(
-        effects=[
-            L2.Reference(name="x"),
-        ],
+        effects=[L2.Reference(name="x")],
         value=L2.Reference(name="y"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_term(term, k, fresh)
 
@@ -235,7 +205,6 @@ def test_cps_convert_program():
         parameters=["x"],
         body=L2.Reference(name="x"),
     )
-
     fresh = SequentialNameGenerator()
     actual = cps_convert_program(program, fresh)
 
@@ -243,5 +212,52 @@ def test_cps_convert_program():
         parameters=["x"],
         body=L1.Halt(value="x"),
     )
-
     assert actual == expected
+
+def test_cps_convert_term_begin_multiple_effects():
+    """Covers: Begin case with multiple effects (113 ↛ exit)"""
+    term = L2.Begin(
+        effects=[
+            L2.Reference(name="a"),
+            L2.Reference(name="b"),
+        ],
+        value=L2.Reference(name="c"),
+    )
+    fresh = SequentialNameGenerator()
+    actual = cps_convert_term(term, k, fresh)
+
+
+    expected = L1.Halt(value="c")
+    assert actual == expected
+
+
+def test_cps_convert_term_apply_with_arguments():
+    """Covers: cps_convert_terms with a non-empty list (138 ↛ 140)"""
+    term = L2.Apply(
+        target=L2.Reference(name="f"),
+        arguments=[
+            L2.Reference(name="x"),
+            L2.Reference(name="y"),
+        ],
+    )
+    fresh = SequentialNameGenerator()
+    actual = cps_convert_term(term, k, fresh)
+
+    expected = L1.Abstract(
+        destination="k0",
+        parameters=["t0"],
+        body=L1.Halt(value="t0"),
+        then=L1.Apply(
+            target="f",
+            arguments=["x", "y", "k0"],
+        ),
+    )
+    assert actual == expected
+
+
+def test_cps_convert_program_invalid():
+    """Covers: cps_convert_program case _ fallthrough (149 ↛ exit)"""
+    import pytest
+    fresh = SequentialNameGenerator()
+    with pytest.raises(ValueError):
+        cps_convert_program("not a program", fresh)  # type: ignore[arg-type]
