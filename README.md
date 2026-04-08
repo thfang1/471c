@@ -1,7 +1,7 @@
 # Status
 
-[![.github/workflows/ci.yml](https://github.com/clause/471c/actions/workflows/ci.yml/badge.svg)](https://github.com/clause/471c/actions/workflows/ci.yml)
-[![Coverage](https://codecov.io/gh/clause/471c/branch/main/graph/badge.svg)](https://codecov.io/gh/clause/471c)
+[![.github/workflows/ci.yml](https://github.com/thfang1/471c/actions/workflows/ci.yml/badge.svg)](https://github.com/clause/471c/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/thfang1/471c/branch/main/graph/badge.svg)](https://codecov.io/gh/clause/471c)
 
 # Contributing 
 
