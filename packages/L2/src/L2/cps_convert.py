@@ -22,13 +22,13 @@ def cps_convert_term(
             return L1.Immediate(destination=v, value=value, then=k(v))
 
         case L2.Primitive(operator=operator, left=left, right=right):
-            def after_left(l: str) -> L1.Statement:
+            def after_left(left_v: str) -> L1.Statement:
                 def after_right(r: str) -> L1.Statement:
                     res = fresh("t")
                     return L1.Primitive(
                         destination=res,
                         operator=operator,
-                        left=l,
+                        left=left_v,
                         right=r,
                         then=k(res),
                     )
@@ -76,7 +76,7 @@ def cps_convert_term(
 
         case L2.Branch(operator=operator, left=left, right=right,
                        consequent=consequent, otherwise=otherwise):
-            def after_left(l: str) -> L1.Statement:
+            def after_left(left_v: str) -> L1.Statement:
                 def after_right(r: str) -> L1.Statement:
                     j_obj = fresh("j")
                     rv = fresh("t")
@@ -86,7 +86,7 @@ def cps_convert_term(
                         body=k(rv),
                         then=L1.Branch(
                             operator=operator,
-                            left=l,
+                            left=left_v,
                             right=r,
                             then=_term(consequent, lambda v: L1.Apply(target=j_obj, arguments=[v])),
                             otherwise=_term(otherwise, lambda v: L1.Apply(target=j_obj, arguments=[v])),
