@@ -38,12 +38,14 @@ def simplify(term: Term, env: Env = {}) -> Term:
 
         case Primitive(operator=op, left=l, right=r):
             sl, sr = simplify(l, env), simplify(r, env)
-
             if isinstance(sl, Immediate) and isinstance(sr, Immediate):
                 lv, rv = int(sl.value), int(sr.value)
-                if op == "+": return Immediate(value=lv + rv)
-                if op == "-": return Immediate(value=lv - rv)
-                if op == "*": return Immediate(value=lv * rv)
+                if op == "+":
+                    return Immediate(value=lv + rv)
+                elif op == "-":
+                    return Immediate(value=lv - rv)
+                else: # 這裡用 else 處理 "*"
+                    return Immediate(value=lv * rv)
             return Primitive(operator=op, left=sl, right=sr)
 
         case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
@@ -93,6 +95,9 @@ def simplify(term: Term, env: Env = {}) -> Term:
 
         case Allocate(count=c):
             return Allocate(count=c)
+        
+        case _:  # pragma: no cover
+            raise ValueError(f"Unknown term: {term!r}")
 
 def optimize_program(program: Program) -> Program:
 

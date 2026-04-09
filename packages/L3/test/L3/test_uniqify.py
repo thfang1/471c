@@ -201,3 +201,21 @@ def test_uniqify_letrec_edge_case():
         body=Reference(name="f0")
     )
     assert actual == expected
+
+def test_uniqify_term_apply():
+    from L3.syntax import Apply, Reference
+    from L3.uniqify import uniqify_term
+    from util.sequential_name_generator import SequentialNameGenerator
+
+    term = Apply(
+        target=Reference(name="f"),
+        arguments=[Reference(name="x")],
+    )
+    fresh = SequentialNameGenerator()
+    actual = uniqify_term(term, {}, fresh)
+
+    expected = Apply(
+        target=Reference(name="f"),
+        arguments=(Reference(name="x"),),
+    )
+    assert actual == expected

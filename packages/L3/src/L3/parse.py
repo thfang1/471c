@@ -213,17 +213,13 @@ class AstTransformer(Transformer[Token, Program | Term | Identifier | int | tupl
     ) -> Term:
         terms: list[Term] = [t for t in children if not isinstance(t, Token)]
         
-        if not terms:
+        if not terms:   # pragma: no cover
             raise ValueError("Begin block must have at least one term")
             
         return Begin(
             effects=terms[:-1],  
             value=terms[-1],     
         )
-    
-
-
-
 
 def parse_term(source: str) -> Term:
     grammar = Path(__file__).with_name("L3.lark").read_text()
@@ -231,10 +227,8 @@ def parse_term(source: str) -> Term:
     tree = parser.parse(source)  # pyright: ignore[reportUnknownMemberType]
     return AstTransformer().transform(tree)  # pyright: ignore[reportReturnType]
 
-
 def parse_program(source: str) -> Program:
     grammar = Path(__file__).with_name("L3.lark").read_text()
     parser = Lark(grammar, start="program")
     tree = parser.parse(source)  # pyright: ignore[reportUnknownMemberType]
-    return AstTransformer().transform(tree)  # pyright: ignore[reportReturnType]
     return AstTransformer().transform(tree)  # pyright: ignore[reportReturnType]

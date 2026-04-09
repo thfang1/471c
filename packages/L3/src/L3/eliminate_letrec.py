@@ -24,7 +24,7 @@ def eliminate_letrec_term(
             
             return L2.Let(
                 bindings=new_bindings,
-                body=recur(body, new_ctx)
+                body=eliminate_letrec_term(body, new_ctx),
             )
 
         case L3.LetRec(bindings=bindings, body=body):
@@ -35,7 +35,7 @@ def eliminate_letrec_term(
             box_bindings = [(name, L2.Allocate(count=1)) for name in local_rec_names]
 
             init_effects = [
-                L2.Store(base=L2.Reference(name=name), index=0, value=recur(val, new_ctx))
+                L2.Store(base=L2.Reference(name=name), index=0, value=eliminate_letrec_term(val, new_ctx), )
                 for name, val in bindings
             ]
 
@@ -43,13 +43,11 @@ def eliminate_letrec_term(
                 bindings=box_bindings,
                 body=L2.Begin(
                     effects=init_effects,
-                    value=recur(body, new_ctx)
+                    value=eliminate_letrec_term(body, new_ctx),
                 )
             )
 
         case L3.Reference(name=name):
-            # if name is a recursive variable -> (Load (Reference name)))
-            # else (Reference name)
             if name in context:
                 return L2.Load(base=L2.Reference(name=name), index=0)
             return L2.Reference(name=name)
@@ -58,7 +56,7 @@ def eliminate_letrec_term(
             new_ctx = {name: context[name] for name in context if name not in parameters}
             return L2.Abstract(
                 parameters=parameters,
-                body=recur(body, new_ctx)
+                body=eliminate_letrec_term(body, new_ctx),
             )
 
         case L3.Apply(target=target, arguments=arguments):
@@ -118,3 +116,5 @@ def eliminate_letrec_program(
                 parameters=parameters,
                 body=eliminate_letrec_term(body, {}),
             )
+        case _:  # pragma: no cover
+            raise ValueError(f"Unknown L3 program: {program!r}")

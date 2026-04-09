@@ -237,11 +237,6 @@ def test_eliminate_letrec_program():
 
 
 def test_eliminate_letrec_term_creates_boxes_and_stores():
-    # letrec f = f in f
-    # After elimination:
-    # let f = allocate(1) in begin
-    #   store f 0 (load f 0)
-    #   (load f 0)
     term = L3.LetRec(
         bindings=[
             ("f", L3.Reference(name="f")),
@@ -289,8 +284,6 @@ def test_eliminate_letrec_term_reference_recursive_becomes_load():
 
 
 def test_eliminate_let_shadows_recursive_name_in_body():
-    # context says "x is recursive" (should load), BUT Let binds x normally,
-    # so in body, Reference("x") should stay Reference("x") (no load).
     term = L3.Let(
         bindings=[("x", L3.Immediate(value=1))],
         body=L3.Reference(name="x"),
@@ -309,8 +302,6 @@ def test_eliminate_let_shadows_recursive_name_in_body():
 
 
 def test_eliminate_abstract_shadows_recursive_parameter():
-    # context says "x is recursive", BUT lambda parameter x shadows it,
-    # so Reference("x") in body should remain Reference("x"), not Load.
     term = L3.Abstract(
         parameters=["x"],
         body=L3.Reference(name="x"),
@@ -329,8 +320,6 @@ def test_eliminate_abstract_shadows_recursive_parameter():
 
 
 def test_eliminate_apply_and_primitive_recursive_in_lambda():
-    # (letrec f = f in (lambda (x) -> f + x))(1)
-    # f inside lambda should become Load(f,0)
     term = L3.LetRec(
         bindings=[("f", L3.Reference(name="f"))],
         body=L3.Apply(

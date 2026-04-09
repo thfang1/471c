@@ -86,7 +86,6 @@ def test_optimize_abstract_shadowing():
     assert actual.body.body.body == Reference(name="x")
 
 def test_optimize_complex_recursive():
-    # (begin (store (allocate 1) 0 (1+1)) (f (2*3)))
     program = Program(
         parameters=[],
         body=Begin(
@@ -236,3 +235,9 @@ def test_optimize_multi_step_propagation():
     while isinstance(res, Let):
         res = res.body
     assert res == Immediate(value=1)
+
+
+
+def test_optimize_allocate_full_path():
+    prog = Program(parameters=[], body=Allocate(count=10))
+    assert optimize_program(prog).body == Allocate(count=10)
