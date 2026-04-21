@@ -42,10 +42,6 @@ def test_close_with_free_vars():
     lambda_proc = next(p for p in actual.procedures if p.name != "main")
     assert any(isinstance(s, L0.Load) for s in [lambda_proc.body]) 
 
-import L1.syntax as L1
-from L1.close import free_vars
-
-
 def test_free_vars_coverage():
     assert free_vars(L1.Copy(destination="d", source="s", then=L1.Halt(value="d"))) == {"s"}
     assert free_vars(L1.Abstract(destination="f", parameters=["p"], body=L1.Halt(value="v"), then=L1.Halt(value="f"))) == {"v"}
