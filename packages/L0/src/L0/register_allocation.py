@@ -29,6 +29,8 @@ def get_vars(stmt: L0.Statement) -> tuple[set[str], set[str]]:
             return {t} | set(args), set()
         case L0.Halt(value=v):
             return {v}, set()
+        case _:  # pragma: no cover
+            return []
 
 
 def get_successors(stmt: L0.Statement) -> list[L0.Statement]:
