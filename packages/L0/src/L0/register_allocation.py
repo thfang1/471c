@@ -9,16 +9,26 @@ FreshFunc = Callable[[str], str]
 
 def get_vars(stmt: L0.Statement) -> tuple[set[str], set[str]]:
     match stmt:
-        case L0.Copy(destination=d, source=s):            return {s}, {d}
-        case L0.Immediate(destination=d):                 return set(), {d}
-        case L0.Primitive(destination=d, left=l, right=r): return {l, r}, {d}
-        case L0.Branch(left=l, right=r):                  return {l, r}, set()
-        case L0.Allocate(destination=d):                  return set(), {d}
-        case L0.Load(destination=d, base=b):              return {b}, {d}
-        case L0.Store(base=b, value=v):                   return {b, v}, set()
-        case L0.Address(destination=d):                   return set(), {d}
-        case L0.Call(target=t, arguments=args):           return {t} | set(args), set()
-        case L0.Halt(value=v):                            return {v}, set()
+        case L0.Copy(destination=d, source=s):
+            return {s}, {d}
+        case L0.Immediate(destination=d):
+            return set(), {d}
+        case L0.Primitive(destination=d, left=l, right=r):
+            return {l, r}, {d}
+        case L0.Branch(left=l, right=r):
+            return {l, r}, set()
+        case L0.Allocate(destination=d):
+            return set(), {d}
+        case L0.Load(destination=d, base=b):
+            return {b}, {d}
+        case L0.Store(base=b, value=v):
+            return {b, v}, set()
+        case L0.Address(destination=d):
+            return set(), {d}
+        case L0.Call(target=t, arguments=args):
+            return {t} | set(args), set()
+        case L0.Halt(value=v):
+            return {v}, set()
 
 
 def get_successors(stmt: L0.Statement) -> list[L0.Statement]:
@@ -213,7 +223,8 @@ def rewrite_program(program: L0.Program) -> L0.Program:
                     )
                 case L0.Halt(value=v):
                     result = L0.Halt(value=rename(v))
-                case _: raise ValueError(f"Unexpected statement: {s}")  # pragma: no cover
+                case _:  # pragma: no cover
+                    raise ValueError(f"Unexpected statement: {s}")
 
             walked[id(s)] = result
             return result
