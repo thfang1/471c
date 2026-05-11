@@ -37,21 +37,29 @@ def _all_registers(proc: L0.Procedure) -> set[str]:
     def walk(s: L0.Statement) -> None:
         match s:
             case L0.Copy(destination=d, source=src, then=t):
-                acc.update([d, src]); walk(t)
+                acc.update([d, src]); 
+                walk(t)
             case L0.Immediate(destination=d, then=t):
-                acc.add(d); walk(t)
+                acc.add(d); 
+                walk(t)
             case L0.Primitive(destination=d, left=l, right=r, then=t):
-                acc.update([d, l, r]); walk(t)
+                acc.update([d, l, r]); 
+                walk(t)
             case L0.Branch(left=l, right=r, then=th, otherwise=ot):
-                acc.update([l, r]); walk(th); walk(ot)
+                acc.update([l, r]); walk(th); 
+                walk(ot)
             case L0.Allocate(destination=d, then=t):
-                acc.add(d); walk(t)
+                acc.add(d); 
+                walk(t)
             case L0.Load(destination=d, base=b, then=t):
-                acc.update([d, b]); walk(t)
+                acc.update([d, b]); 
+                walk(t)
             case L0.Store(base=b, value=v, then=t):
-                acc.update([b, v]); walk(t)
+                acc.update([b, v]); 
+                walk(t)
             case L0.Address(destination=d, then=t):
-                acc.add(d); walk(t)
+                acc.add(d); 
+                walk(t)
             case L0.Call(target=tg, arguments=args):
                 acc.add(tg)
                 for arg in args:
