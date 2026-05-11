@@ -46,7 +46,8 @@ def _all_registers(proc: L0.Procedure) -> set[str]:
                 acc.update([d, l, r]) 
                 walk(t)
             case L0.Branch(left=l, right=r, then=th, otherwise=ot):
-                acc.update([l, r]); walk(th) 
+                acc.update([l, r])
+                walk(th) 
                 walk(ot)
             case L0.Allocate(destination=d, then=t):
                 acc.add(d)
