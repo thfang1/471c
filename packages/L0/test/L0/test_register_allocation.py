@@ -1,414 +1,1175 @@
-import pytest
 from L0 import syntax as L0
-from L0.register_allocation import (REGISTERS, build_interference, color_graph,
-                                    compute_liveness, get_successors, get_vars,
-                                    rewrite_program)
+from L0.register_allocation import (
+    REGISTERS,
+    build_interference,
+    color_graph,
+    compute_liveness,
+    rewrite_spills,
+    apply_allocation,
+    allocate_procedure,
+    allocate_program,
+)
 
 
-def all_stmts_reachable(body: L0.Statement) -> list[L0.Statement]:
-    result: list[L0.Statement] = []
-    visited: set[int] = set()
-    stack: list[L0.Statement] = [body]
-    while stack:
-        s = stack.pop()
-        if id(s) in visited:
-            continue
-        visited.add(id(s))
-        result.append(s)
-        stack.extend(get_successors(s))
-    return result
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_fresh():
+    count = [0]
+    existing: set[str] = set()
+
+    def fresh(hint: str) -> str:
+        while True:
+            name = f"{hint}_{count[0]}"
+            count[0] += 1
+            if name not in existing:
+                existing.add(name)
+                return name
+
+    return fresh
 
 
-def collect_vars(prog: L0.Program) -> set[str]:
-    names: set[str] = set()
-    for proc in prog.procedures:
-        names.update(proc.parameters)
-        for s in all_stmts_reachable(proc.body):
-            gen, kill = get_vars(s)
-            names |= gen | kill
-    return names
+def _all_registers(proc: L0.Procedure) -> set[str]:
+    """Collect every identifier that appears in the procedure body."""
+    acc: set[str] = set()
 
-class TestGetVars:
-    def test_copy(self):
-        halt = L0.Halt(value="x")
-        stmt = L0.Copy(destination="x", source="y", then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == {"y"}
-        assert kill == {"x"}
+    def walk(s: L0.Statement) -> None:
+        match s:
+            case L0.Copy(destination=d, source=src, then=t):
+                acc.update([d, src]); walk(t)
+            case L0.Immediate(destination=d, then=t):
+                acc.add(d); walk(t)
+            case L0.Primitive(destination=d, left=l, right=r, then=t):
+                acc.update([d, l, r]); walk(t)
+            case L0.Branch(left=l, right=r, then=th, otherwise=ot):
+                acc.update([l, r]); walk(th); walk(ot)
+            case L0.Allocate(destination=d, then=t):
+                acc.add(d); walk(t)
+            case L0.Load(destination=d, base=b, then=t):
+                acc.update([d, b]); walk(t)
+            case L0.Store(base=b, value=v, then=t):
+                acc.update([b, v]); walk(t)
+            case L0.Address(destination=d, then=t):
+                acc.add(d); walk(t)
+            case L0.Call(target=tg, arguments=args):
+                acc.add(tg)
+                for arg in args:
+                    acc.add(arg)
+            case L0.Halt(value=v):
+                acc.add(v)
 
-    def test_immediate(self):
-        halt = L0.Halt(value="x")
-        stmt = L0.Immediate(destination="x", value=42, then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == set()
-        assert kill == {"x"}
-
-    def test_primitive(self):
-        halt = L0.Halt(value="z")
-        stmt = L0.Primitive(destination="z", operator="+", left="x", right="y", then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == {"x", "y"}
-        assert kill == {"z"}
-
-    def test_branch(self):
-        halt = L0.Halt(value="x")
-        stmt = L0.Branch(operator="<", left="a", right="b", then=halt, otherwise=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == {"a", "b"}
-        assert kill == set()
-
-    def test_allocate(self):
-        halt = L0.Halt(value="p")
-        stmt = L0.Allocate(destination="p", count=4, then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == set()
-        assert kill == {"p"}
-
-    def test_load(self):
-        halt = L0.Halt(value="v")
-        stmt = L0.Load(destination="v", base="p", index=0, then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == {"p"}
-        assert kill == {"v"}
-
-    def test_store(self):
-        halt = L0.Halt(value="p")
-        stmt = L0.Store(base="p", index=0, value="v", then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == {"p", "v"}
-        assert kill == set()
-
-    def test_address(self):
-        halt = L0.Halt(value="a")
-        stmt = L0.Address(destination="a", name="foo", then=halt)
-        gen, kill = get_vars(stmt)
-        assert gen == set()
-        assert kill == {"a"}
-
-    def test_call(self):
-        stmt = L0.Call(target="fn", arguments=["x", "y"])
-        gen, kill = get_vars(stmt)
-        assert gen == {"fn", "x", "y"}
-        assert kill == set()
-
-    def test_halt(self):
-        stmt = L0.Halt(value="r")
-        gen, kill = get_vars(stmt)
-        assert gen == {"r"}
-        assert kill == set()
+    walk(proc.body)
+    return acc
 
 
-class TestGetSuccessors:
-    def setup_method(self):
-        self.halt = L0.Halt(value="x")
+# ---------------------------------------------------------------------------
+# REGISTERS constant
+# ---------------------------------------------------------------------------
 
-    def test_halt_has_no_successors(self):
-        assert get_successors(self.halt) == []
+class TestRegisters:
+    def test_is_tuple_of_strings(self):
+        assert isinstance(REGISTERS, tuple)
+        assert all(isinstance(r, str) for r in REGISTERS)
 
-    def test_call_has_no_successors(self):
-        stmt = L0.Call(target="fn", arguments=[])
-        assert get_successors(stmt) == []
+    def test_nonempty(self):
+        assert len(REGISTERS) > 0
 
-    def test_copy_successor(self):
-        stmt = L0.Copy(destination="x", source="y", then=self.halt)
-        assert get_successors(stmt) == [self.halt]
+    def test_unique(self):
+        assert len(REGISTERS) == len(set(REGISTERS))
 
-    def test_immediate_successor(self):
-        stmt = L0.Immediate(destination="x", value=1, then=self.halt)
-        assert get_successors(stmt) == [self.halt]
 
-    def test_primitive_successor(self):
-        stmt = L0.Primitive(destination="z", operator="+", left="x", right="y", then=self.halt)
-        assert get_successors(stmt) == [self.halt]
-
-    def test_branch_two_successors(self):
-        halt2 = L0.Halt(value="y")
-        stmt = L0.Branch(operator="==", left="a", right="b", then=self.halt, otherwise=halt2)
-        succs = get_successors(stmt)
-        assert len(succs) == 2
-        assert self.halt in succs
-        assert halt2 in succs
-
-    def test_allocate_successor(self):
-        stmt = L0.Allocate(destination="p", count=1, then=self.halt)
-        assert get_successors(stmt) == [self.halt]
-
-    def test_load_successor(self):
-        stmt = L0.Load(destination="v", base="p", index=0, then=self.halt)
-        assert get_successors(stmt) == [self.halt]
-
-    def test_store_successor(self):
-        stmt = L0.Store(base="p", index=0, value="v", then=self.halt)
-        assert get_successors(stmt) == [self.halt]
-
-    def test_address_successor(self):
-        stmt = L0.Address(destination="a", name="lbl", then=self.halt)
-        assert get_successors(stmt) == [self.halt]
-
-    def test_shared_node_visited_once(self):
-        halt   = L0.Halt(value="x")
-        branch = L0.Branch(operator="==", left="a", right="b",
-                           then=halt, otherwise=halt)
-        stmts  = all_stmts_reachable(branch)
-        assert stmts.count(halt) == 1
-
+# ---------------------------------------------------------------------------
+# compute_liveness
+# ---------------------------------------------------------------------------
 
 class TestComputeLiveness:
-    def test_single_halt(self):
-        halt = L0.Halt(value="x")
-        live_out = compute_liveness(halt)
-        assert live_out[id(halt)] == set()
+    def test_halt_live_in(self):
+        # halt(x)  →  in={x}, out=live_at_end
+        stmt = L0.Halt(value="x")
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]({"x"}))
+        assert "x" in in_sets[0]
+        assert out_sets[0] == frozenset[str]({"x"})
 
-    def test_linear_two_stmts(self):
-        halt = L0.Halt(value="x")
-        imm  = L0.Immediate(destination="x", value=1, then=halt)
-        live_out = compute_liveness(imm)
-        assert "x" in live_out[id(imm)]
-        assert live_out[id(halt)] == set()
+    def test_immediate_kills_destination(self):
+        # x := 1; halt(x)
+        stmt = L0.Immediate(destination="x", value=1, then=L0.Halt(value="x"))
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]({"x"}))
+        # x is not live before the immediate (it's being defined)
+        assert "x" not in in_sets[0]
+        # x is live after (used by halt)
+        assert "x" in out_sets[0]
+
+    def test_copy_gen(self):
+        # x := y; halt(x)
+        stmt = L0.Copy(
+            destination="x", source="y",
+            then=L0.Halt(value="x"),
+        )
+        in_sets, _ = compute_liveness(stmt, frozenset[str]({"x"}))
+        # y must be live at start of copy
+        assert "y" in in_sets[0]
+
+    def test_primitive_gen_both_operands(self):
+        # z := x + y; halt(z)
+        stmt = L0.Primitive(
+            destination="z", operator="+", left="x", right="y",
+            then=L0.Halt(value="z"),
+        )
+        in_sets, _ = compute_liveness(stmt, frozenset[str]({"z"}))
+        assert "x" in in_sets[0]
+        assert "y" in in_sets[0]
 
     def test_dead_variable_not_live(self):
-        halt  = L0.Halt(value="x")
-        imm2  = L0.Immediate(destination="x", value=2, then=halt)
-        imm1  = L0.Immediate(destination="x", value=1, then=imm2)
-        live_out = compute_liveness(imm1)
-        assert "x" not in live_out[id(imm1)]
+        # x := 1; y := 2; halt(y)  →  x is dead after assignment
+        stmt = L0.Immediate(
+            destination="x", value=1,
+            then=L0.Immediate(
+                destination="y", value=2,
+                then=L0.Halt(value="y"),
+            ),
+        )
+        _, out_sets = compute_liveness(stmt, frozenset[str]({"y"}))
+        # x is not live out of first immediate (y=2 kills nothing about x,
+        # but x is never used again so it should not appear in out[1])
+        assert "x" not in out_sets[1]
 
-    def test_branch_liveness_merges(self):
-        halt_a  = L0.Halt(value="a")
-        halt_b  = L0.Halt(value="b")
-        branch  = L0.Branch(operator="<", left="a", right="b",
-                            then=halt_a, otherwise=halt_b)
-        live_out = compute_liveness(branch)
-        assert live_out[id(branch)] == {"a", "b"}
+    def test_branch_merges_both_successors(self):
+        # if x < y then halt(a) else halt(b)
+        # a is live on the then-path, b on the else-path
+        stmt = L0.Branch(
+            operator="<", left="x", right="y",
+            then=L0.Halt(value="a"),
+            otherwise=L0.Halt(value="b"),
+        )
+        in_sets, _ = compute_liveness(stmt, frozenset[str]())
+        all_live: frozenset[str] = frozenset(
+            v for s in in_sets.values() for v in s
+        )
+        # x and y are generated by the branch
+        assert "x" in all_live
+        assert "y" in all_live
+        # a and b are each live on one of the two paths
+        assert "a" in all_live
+        assert "b" in all_live
 
-    def test_two_vars_simultaneously_live(self):
-        halt  = L0.Halt(value="z")
-        prim  = L0.Primitive(destination="z", operator="+", left="x", right="y", then=halt)
-        imm_y = L0.Immediate(destination="y", value=2, then=prim)
-        imm_x = L0.Immediate(destination="x", value=1, then=imm_y)
-        live_out = compute_liveness(imm_x)
-        assert "x" in live_out[id(imm_x)]
+    def test_linear_chain_propagation(self):
+        # a := 1; b := a + a; halt(b)
+        stmt = L0.Immediate(
+            destination="a", value=1,
+            then=L0.Primitive(
+                destination="b", operator="+", left="a", right="a",
+                then=L0.Halt(value="b"),
+            ),
+        )
+        in_sets, _ = compute_liveness(stmt, frozenset[str]({"b"}))
+        # a is live into the Primitive (node 1) — i.e. in_sets[1]
+        assert "a" in in_sets[1]
+        # b is live into the Halt (node 2) — i.e. in_sets[2]
+        assert "b" in in_sets[2]
 
+    def test_store_gen_base_and_value(self):
+        # store(base=p, index=0, value=v); halt(p)
+        stmt = L0.Store(
+            base="p", index=0, value="v",
+            then=L0.Halt(value="p"),
+        )
+        in_sets, _ = compute_liveness(stmt, frozenset[str]({"p"}))
+        assert "p" in in_sets[0]
+        assert "v" in in_sets[0]
+
+    def test_load_gen_base_kill_destination(self):
+        # d := load(p, 0); halt(d)
+        stmt = L0.Load(
+            destination="d", base="p", index=0,
+            then=L0.Halt(value="d"),
+        )
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]({"d"}))
+        assert "p" in in_sets[0]
+        assert "d" not in in_sets[0]
+        assert "d" in out_sets[0]
+
+    def test_returns_two_mappings_same_length(self):
+        stmt = L0.Immediate(
+            destination="x", value=0,
+            then=L0.Halt(value="x"),
+        )
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]({"x"}))
+        assert len(in_sets) == len(out_sets) == 2
+
+
+# ---------------------------------------------------------------------------
+# build_interference
+# ---------------------------------------------------------------------------
 
 class TestBuildInterference:
-    def test_no_interference_sequential(self):
-        halt = L0.Halt(value="y")
-        copy = L0.Copy(destination="y", source="x", then=halt)
-        imm  = L0.Immediate(destination="x", value=1, then=copy)
-        live_out = compute_liveness(imm)
-        graph = build_interference(imm, live_out)
-        assert "x" not in graph.get("y", set())
-        assert "y" not in graph.get("x", set())
+    def test_two_simultaneously_live_vars_interfere(self):
+        # a := 1; b := 2; halt(a)   — b is live at halt? No.
+        # a := 1; b := 2; c := a+b; halt(c)
+        # a and b are simultaneously live at the Primitive
+        stmt = L0.Immediate(
+            destination="a", value=1,
+            then=L0.Immediate(
+                destination="b", value=2,
+                then=L0.Primitive(
+                    destination="c", operator="+", left="a", right="b",
+                    then=L0.Halt(value="c"),
+                ),
+            ),
+        )
+        graph = build_interference(stmt, frozenset[str]({"c"}))
+        assert "b" in graph["a"] or "a" in graph["b"]
 
-    def test_interference_simultaneous(self):
-        halt  = L0.Halt(value="z")
-        prim  = L0.Primitive(destination="z", operator="+", left="x", right="y", then=halt)
-        imm_y = L0.Immediate(destination="y", value=2, then=prim)
-        imm_x = L0.Immediate(destination="x", value=1, then=imm_y)
-        live_out = compute_liveness(imm_x)
-        graph = build_interference(imm_x, live_out)
-        assert "y" in graph.get("x", set())
-        assert "x" in graph.get("y", set())
+    def test_never_live_simultaneously_no_edge(self):
+        # a := 1; halt(a)  —  b never appears, no interference
+        stmt = L0.Immediate(
+            destination="a", value=1,
+            then=L0.Halt(value="a"),
+        )
+        graph = build_interference(stmt, frozenset[str]({"a"}))
+        assert "a" in graph
+        assert len(graph["a"]) == 0
 
-    def test_graph_is_symmetric(self):
-        halt  = L0.Halt(value="z")
-        prim  = L0.Primitive(destination="z", operator="+", left="x", right="y", then=halt)
-        imm_y = L0.Immediate(destination="y", value=2, then=prim)
-        imm_x = L0.Immediate(destination="x", value=1, then=imm_y)
-        live_out = compute_liveness(imm_x)
-        graph = build_interference(imm_x, live_out)
-        for u, neighbors in graph.items():
-            for v in neighbors:
-                assert u in graph[v], f"{u}→{v} exists but {v}→{u} doesn't exist"
+    def test_copy_suppression(self):
+        # x := y; halt(x)
+        # y is in out[copy] because x is live and x==y value-wise,
+        # but Definition 9.2 suppresses the x–y interference edge for copies.
+        stmt = L0.Copy(
+            destination="x", source="y",
+            then=L0.Halt(value="x"),
+        )
+        graph = build_interference(stmt, frozenset[str]({"x"}))
+        # x and y should NOT interfere (copy suppression)
+        assert "y" not in graph.get("x", set[str]())
+        assert "x" not in graph.get("y", set[str]())
 
+    def test_interference_is_symmetric(self):
+        stmt = L0.Immediate(
+            destination="a", value=1,
+            then=L0.Immediate(
+                destination="b", value=2,
+                then=L0.Primitive(
+                    destination="c", operator="+", left="a", right="b",
+                    then=L0.Halt(value="c"),
+                ),
+            ),
+        )
+        graph = build_interference(stmt, frozenset[str]({"c"}))
+        for v, nbrs in graph.items():
+            for u in nbrs:
+                assert v in graph[u], f"edge {v}–{u} not symmetric"
+
+    def test_all_vars_appear_as_nodes(self):
+        stmt = L0.Immediate(
+            destination="x", value=0,
+            then=L0.Halt(value="x"),
+        )
+        graph = build_interference(stmt, frozenset[str]({"x"}))
+        assert "x" in graph
+
+    def test_branch_both_paths_contribute(self):
+        # if a < b then halt(c) else halt(d)
+        # c and d both live at the branch out, so they both interfere with
+        # whatever is killed there (nothing here), but a and b are generated.
+        stmt = L0.Branch(
+            operator="<", left="a", right="b",
+            then=L0.Halt(value="c"),
+            otherwise=L0.Halt(value="d"),
+        )
+        graph = build_interference(stmt, frozenset[str]())
+        # a, b, c, d should all appear as nodes
+        for v in ("a", "b", "c", "d"):
+            assert v in graph
+
+    def test_no_self_loops(self):
+        stmt = L0.Primitive(
+            destination="z", operator="+", left="x", right="y",
+            then=L0.Halt(value="z"),
+        )
+        graph = build_interference(stmt, frozenset[str]({"z"}))
+        for v, nbrs in graph.items():
+            assert v not in nbrs, f"self-loop on {v}"
+
+
+# ---------------------------------------------------------------------------
+# color_graph
+# ---------------------------------------------------------------------------
 
 class TestColorGraph:
     def test_empty_graph(self):
-        assert color_graph({}) == {}
+        coloring, spilled = color_graph({}, ["r0", "r1"], {})
+        assert coloring == {}
+        assert spilled == frozenset[str]()
 
     def test_single_node(self):
-        colors = color_graph({"x": set()})
-        assert colors["x"] in REGISTERS
+        graph = {"x": frozenset[str]()}
+        coloring, spilled = color_graph(graph, ["r0"], {})
+        assert coloring["x"] == "r0"
+        assert not spilled
 
-    def test_two_interfering_nodes_get_different_colors(self):
-        graph = {"x": {"y"}, "y": {"x"}}
-        colors = color_graph(graph)
-        assert colors["x"] in REGISTERS
-        assert colors["y"] in REGISTERS
-        assert colors["x"] != colors["y"]
-
-    def test_triangle_three_colors(self):
+    def test_two_interfering_nodes_get_different_registers(self):
         graph = {
-            "a": {"b", "c"},
-            "b": {"a", "c"},
-            "c": {"a", "b"},
+            "x": frozenset[str]({"y"}),
+            "y": frozenset[str]({"x"}),
         }
-        colors = color_graph(graph)
-        assert colors["a"] != colors["b"]
-        assert colors["b"] != colors["c"]
-        assert colors["a"] != colors["c"]
+        coloring, spilled = color_graph(graph, ["r0", "r1"], {})
+        assert not spilled
+        assert coloring["x"] != coloring["y"]
 
-    def test_no_adjacent_same_color(self):
-        nodes = ["n0", "n1", "n2", "n3", "n4"]
-        graph: dict[str, set[str]] = {n: set() for n in nodes}
-        for i, n in enumerate(nodes):
-            graph[n].add(nodes[(i + 1) % 5])
-            graph[n].add(nodes[(i - 1) % 5])
-        colors = color_graph(graph)
-        for u, neighbors in graph.items():
-            for v in neighbors:
-                assert colors[u] != colors[v], \
-                    f"Neighbors {u} and {v} are allocated to the same register {colors[u]}"
+    def test_two_non_interfering_nodes_may_share(self):
+        graph = {
+            "x": frozenset[str](),
+            "y": frozenset[str](),
+        }
+        coloring, spilled = color_graph(graph, ["r0"], {})
+        assert not spilled
+        assert coloring["x"] == "r0"
+        assert coloring["y"] == "r0"
 
-    def test_all_assigned_registers_are_valid(self):
-        graph = {"a": {"b"}, "b": {"a", "c"}, "c": {"b"}}
-        colors = color_graph(graph)
-        for var, reg in colors.items():
-            assert reg in REGISTERS, f"{var} is allocated to an illegal regsiter {reg}"
+    def test_spill_when_not_enough_registers(self):
+        # Triangle: all three interfere with each other → need 3 registers
+        graph = {
+            "a": frozenset[str]({"b", "c"}),
+            "b": frozenset[str]({"a", "c"}),
+            "c": frozenset[str]({"a", "b"}),
+        }
+        coloring, spilled = color_graph(graph, ["r0", "r1"], {})
+        # At least one must be spilled
+        assert len(spilled) >= 1
+        # Colored nodes must have different registers from all their neighbours
+        for v, reg in coloring.items():
+            for nb in graph[v]:
+                if nb in coloring:
+                    assert coloring[nb] != reg
 
-    def test_too_many_interferences_raises(self):
-        K = len(REGISTERS)
-        nodes = [f"v{i}" for i in range(K + 1)]
-        graph = {n: set(nodes) - {n} for n in nodes}
-        with pytest.raises(RuntimeError, match="Register spilling required"):
-            color_graph(graph)
+    def test_precolored_node_respected(self):
+        graph = {
+            "x": frozenset[str]({"y"}),
+            "y": frozenset[str]({"x"}),
+        }
+        coloring, spilled = color_graph(graph, ["r0", "r1"], {"x": "r0"})
+        assert coloring["x"] == "r0"
+        assert coloring["y"] == "r1"
+        assert not spilled
 
+    def test_precolored_node_not_spilled(self):
+        # Even with only 1 register, a precolored node must keep its color
+        graph = {
+            "x": frozenset[str]({"y"}),
+            "y": frozenset[str]({"x"}),
+        }
+        coloring, spilled = color_graph(graph, ["r0"], {"x": "r0"})
+        assert "x" not in spilled
+        assert coloring["x"] == "r0"
 
-class TestRewriteProgram:
-    def _make_program(self, body: L0.Statement, params: list[str] = []) -> L0.Program:
-        return L0.Program(procedures=[
-            L0.Procedure(name="main", parameters=params, body=body)
-        ])
+    def test_coloring_valid_no_adjacent_same_color(self):
+        # 4-node path: a-b-c-d
+        graph = {
+            "a": frozenset[str]({"b"}),
+            "b": frozenset[str]({"a", "c"}),
+            "c": frozenset[str]({"b", "d"}),
+            "d": frozenset[str]({"c"}),
+        }
+        coloring, spilled = color_graph(graph, ["r0", "r1"], {})
+        assert not spilled
+        for v, nbrs in graph.items():
+            for nb in nbrs:
+                assert coloring[v] != coloring[nb]
 
-    def test_halt_only(self):
-        body = L0.Halt(value="x")
-        prog = self._make_program(body, params=["x"])
-        result = rewrite_program(prog)
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS), \
-            f"Still have name(s) of register(s) after revising {vars_used - set(REGISTERS)}"
-
-    def test_simple_linear(self):
-        halt = L0.Halt(value="x")
-        body = L0.Immediate(destination="x", value=1, then=halt)
-        result = rewrite_program(self._make_program(body))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
-
-    def test_add_two_numbers(self):
-        # imm x=3 → imm y=4 → prim z=x+y → halt(z)
-        halt  = L0.Halt(value="z")
-        prim  = L0.Primitive(destination="z", operator="+", left="x", right="y", then=halt)
-        imm_y = L0.Immediate(destination="y", value=4, then=prim)
-        imm_x = L0.Immediate(destination="x", value=3, then=imm_y)
-        result = rewrite_program(self._make_program(imm_x))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
-
-    def test_branch_program(self):
-        # imm a=1 → imm b=2 → branch(a<b) → halt(a) / halt(b)
-        halt_a  = L0.Halt(value="a")
-        halt_b  = L0.Halt(value="b")
-        branch  = L0.Branch(operator="<", left="a", right="b",
-                            then=halt_a, otherwise=halt_b)
-        imm_b   = L0.Immediate(destination="b", value=2, then=branch)
-        imm_a   = L0.Immediate(destination="a", value=1, then=imm_b)
-        result  = rewrite_program(self._make_program(imm_a))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
-
-    def test_no_two_interfering_vars_share_register(self):
-        # imm x=1 → imm y=2 → prim z=x+y → halt(z)
-        halt  = L0.Halt(value="z")
-        prim  = L0.Primitive(destination="z", operator="+", left="x", right="y", then=halt)
-        imm_y = L0.Immediate(destination="y", value=2, then=prim)
-        imm_x = L0.Immediate(destination="x", value=1, then=imm_y)
-        result = rewrite_program(self._make_program(imm_x))
-
-        proc = result.procedures[0]
-        stmts = all_stmts_reachable(proc.body)
-        prim_nodes = [s for s in stmts if isinstance(s, L0.Primitive)]
-        assert prim_nodes, "Primitive nodes not found"
-        p = prim_nodes[0]
-        assert p.left != p.right, \
-            f"x and y（active）are allocated to a same register {p.left}"
-
-    def test_load_store_rewrite(self):
-        # alloc p → store p[0]=v → load w=p[0] → halt(w)
-        halt  = L0.Halt(value="w")
-        load  = L0.Load(destination="w", base="p", index=0, then=halt)
-        store = L0.Store(base="p", index=0, value="v", then=load)
-        imm_v = L0.Immediate(destination="v", value=99, then=store)
-        alloc = L0.Allocate(destination="p", count=1, then=imm_v)
-        result = rewrite_program(self._make_program(alloc))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
-
-    def test_address_rewrite(self):
-        # addr a=label → halt(a)
-        halt = L0.Halt(value="a")
-        addr = L0.Address(destination="a", name="my_label", then=halt)
-        result = rewrite_program(self._make_program(addr))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
-
-    def test_call_rewrite(self):
-        # imm x=1 → imm y=2 → call fn(x, y)
-        call   = L0.Call(target="fn", arguments=["x", "y"])
-        imm_y  = L0.Immediate(destination="y", value=2, then=call)
-        imm_x  = L0.Immediate(destination="x", value=1, then=imm_y)
-        result = rewrite_program(self._make_program(imm_x))
-        proc = result.procedures[0]
-        stmts = all_stmts_reachable(proc.body)
-        calls = [s for s in stmts if isinstance(s, L0.Call)]
-        assert calls
-        c = calls[0]
-        assert c.target in REGISTERS
-        assert all(a in REGISTERS for a in c.arguments)
-
-    def test_copy_rewrite(self):
-        # imm x=5 → copy y=x → halt(y)
-        halt = L0.Halt(value="y")
-        copy = L0.Copy(destination="y", source="x", then=halt)
-        imm  = L0.Immediate(destination="x", value=5, then=copy)
-        result = rewrite_program(self._make_program(imm))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
-
-    def test_branch_distinct_halts(self):
-        halt_t  = L0.Halt(value="a")
-        halt_f  = L0.Halt(value="b")
-        branch  = L0.Branch(operator="==", left="a", right="b",
-                            then=halt_t, otherwise=halt_f)
-        imm_b   = L0.Immediate(destination="b", value=2, then=branch)
-        imm_a   = L0.Immediate(destination="a", value=1, then=imm_b)
-        result  = rewrite_program(self._make_program(imm_a))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
+    def test_three_colorable_with_three_registers(self):
+        graph = {
+            "a": frozenset[str]({"b", "c"}),
+            "b": frozenset[str]({"a", "c"}),
+            "c": frozenset[str]({"a", "b"}),
+        }
+        coloring, spilled = color_graph(graph, ["r0", "r1", "r2"], {})
+        assert not spilled
+        assert len(set(coloring.values())) == 3
 
 
-        halt   = L0.Halt(value="x")
-        branch = L0.Branch(operator="<", left="x", right="y",
-                           then=halt, otherwise=halt)
-        imm_y  = L0.Immediate(destination="y", value=2, then=branch)
-        imm_x  = L0.Immediate(destination="x", value=1, then=imm_y)
-        result = rewrite_program(self._make_program(imm_x))
-        vars_used = collect_vars(result)
-        assert vars_used <= set(REGISTERS)
+# ---------------------------------------------------------------------------
+# rewrite_spills
+# ---------------------------------------------------------------------------
+
+class TestRewriteSpills:
+    def test_spilled_immediate_gets_store(self):
+        # x := 42; halt(x)  with x spilled
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Immediate(
+                destination="x", value=42,
+                then=L0.Halt(value="x"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"x"}), fresh)
+
+        # Body should start with an Allocate for the slot
+        assert isinstance(result.body, L0.Allocate)
+        assert result.body.count == 1
+
+    def test_spilled_halt_value_gets_load(self):
+        # halt(x) with x spilled → Load x from slot, then Halt
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Immediate(
+                destination="x", value=1,
+                then=L0.Halt(value="x"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"x"}), fresh)
+
+        # Walk to find a Load before the Halt
+        def find_load_before_halt(s: L0.Statement) -> bool:
+            match s:
+                case L0.Load(then=L0.Halt()):
+                    return True
+                case L0.Allocate(then=t) | L0.Immediate(then=t) | L0.Store(then=t):
+                    return find_load_before_halt(t)
+                case _:
+                    return False
+
+        assert find_load_before_halt(result.body)
+
+    def test_no_spills_returns_same_procedure(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Halt(value="x"),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str](), fresh)
+        assert result == proc
+
+    def test_spilled_primitive_operands_get_loads(self):
+        # z := x + y; halt(z)  with x and y spilled
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Primitive(
+                destination="z", operator="+", left="x", right="y",
+                then=L0.Halt(value="z"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"x", "y"}), fresh)
+
+        def count_loads(s: L0.Statement) -> int:
+            match s:
+                case L0.Load(then=t):
+                    return 1 + count_loads(t)
+                case L0.Allocate(then=t) | L0.Immediate(then=t) | L0.Store(then=t) | L0.Primitive(then=t):
+                    return count_loads(t)
+                case L0.Halt():
+                    return 0
+                case _:
+                    return 0
+
+        # At least 2 loads (one per spilled operand)
+        assert count_loads(result.body) >= 2
+
+    def test_name_preserving(self):
+        proc = L0.Procedure(
+            name="main", parameters=["p"],
+            body=L0.Halt(value="p"),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str](), fresh)
+        assert result.name == "main"
+        assert list(result.parameters) == ["p"]
 
 
-        halt1 = L0.Halt(value="x")
-        body1 = L0.Immediate(destination="x", value=1, then=halt1)
-        halt2 = L0.Halt(value="y")
-        body2 = L0.Immediate(destination="y", value=2, then=halt2)
+# ---------------------------------------------------------------------------
+# apply_allocation
+# ---------------------------------------------------------------------------
+
+class TestApplyAllocation:
+    def test_renames_halt_value(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Halt(value="x"),
+        )
+        result = apply_allocation(proc, {"x": "r0"})
+        assert isinstance(result.body, L0.Halt)
+        assert result.body.value == "r0"
+
+    def test_renames_parameters(self):
+        proc = L0.Procedure(
+            name="f", parameters=["a", "b"],
+            body=L0.Halt(value="a"),
+        )
+        result = apply_allocation(proc, {"a": "r0", "b": "r1"})
+        assert list(result.parameters) == ["r0", "r1"]
+
+    def test_unknown_identifier_left_unchanged(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Halt(value="unknown"),
+        )
+        result = apply_allocation(proc, {"x": "r0"})
+        assert isinstance(result.body, L0.Halt)
+        assert result.body.value == "unknown"
+
+    def test_renames_primitive(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Primitive(
+                destination="z", operator="+", left="x", right="y",
+                then=L0.Halt(value="z"),
+            ),
+        )
+        result = apply_allocation(proc, {"x": "r0", "y": "r1", "z": "r2"})
+        assert isinstance(result.body, L0.Primitive)
+        assert result.body.destination == "r2"
+        assert result.body.left == "r0"
+        assert result.body.right == "r1"
+
+    def test_renames_branch(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Branch(
+                operator="<", left="a", right="b",
+                then=L0.Halt(value="a"),
+                otherwise=L0.Halt(value="b"),
+            ),
+        )
+        result = apply_allocation(proc, {"a": "r0", "b": "r1"})
+        assert isinstance(result.body, L0.Branch)
+        assert result.body.left == "r0"
+        assert result.body.right == "r1"
+
+    def test_preserves_procedure_name(self):
+        proc = L0.Procedure(
+            name="my_proc", parameters=[],
+            body=L0.Halt(value="x"),
+        )
+        result = apply_allocation(proc, {"x": "r0"})
+        assert result.name == "my_proc"
+
+
+# ---------------------------------------------------------------------------
+# allocate_procedure  (full pipeline)
+# ---------------------------------------------------------------------------
+
+class TestAllocateProcedure:
+    def test_output_uses_only_valid_registers(self):
+        regs = ["r0", "r1", "r2", "r3"]
+        proc = L0.Procedure(
+            name="f", parameters=["n"],
+            body=L0.Immediate(
+                destination="a", value=1,
+                then=L0.Immediate(
+                    destination="b", value=2,
+                    then=L0.Primitive(
+                        destination="c", operator="+", left="a", right="b",
+                        then=L0.Halt(value="c"),
+                    ),
+                ),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        used = _all_registers(result)
+        # Every name in the output is either a register or a slot pointer
+        # (slot pointers start with "_slot_"); real vars must map to registers
+        for name in used:
+            if not name.startswith("_slot_"):
+                assert name in regs, f"unexpected name {name!r} in output"
+
+    def test_parameters_get_first_registers(self):
+        regs = ["r0", "r1", "r2"]
+        proc = L0.Procedure(
+            name="f", parameters=["x", "y"],
+            body=L0.Primitive(
+                destination="z", operator="+", left="x", right="y",
+                then=L0.Halt(value="z"),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        assert list(result.parameters) == ["r0", "r1"]
+
+    def test_single_variable_program(self):
+        regs = ["r0"]
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Immediate(
+                destination="x", value=99,
+                then=L0.Halt(value="x"),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        assert isinstance(result.body, L0.Immediate)
+        assert result.body.destination == "r0"
+
+    def test_spill_and_recolor_terminates(self):
+        # Force spilling: 5 simultaneously live variables with only 2 registers
+        regs = ["r0", "r1"]
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Immediate(
+                destination="a", value=1,
+                then=L0.Immediate(
+                    destination="b", value=2,
+                    then=L0.Immediate(
+                        destination="c", value=3,
+                        then=L0.Primitive(
+                            destination="d", operator="+", left="a", right="b",
+                            then=L0.Primitive(
+                                destination="e", operator="+", left="c", right="d",
+                                then=L0.Halt(value="e"),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        # Should not raise; spilling + recoloring must converge
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+    def test_preserves_procedure_name(self):
+        regs = ["r0"]
+        proc = L0.Procedure(
+            name="entry", parameters=[],
+            body=L0.Immediate(destination="x", value=0, then=L0.Halt(value="x")),
+        )
+        result = allocate_procedure(proc, regs)
+        assert result.name == "entry"
+
+    def test_halt_with_parameter(self):
+        regs = ["r0", "r1"]
+        proc = L0.Procedure(
+            name="id", parameters=["x"],
+            body=L0.Halt(value="x"),
+        )
+        result = allocate_procedure(proc, regs)
+        # x maps to r0; halt should return r0
+        assert isinstance(result.body, L0.Halt)
+        assert result.body.value == "r0"
+
+    def test_branch_procedure(self):
+        regs = ["r0", "r1", "r2"]
+        proc = L0.Procedure(
+            name="f", parameters=["x", "y"],
+            body=L0.Branch(
+                operator="<", left="x", right="y",
+                then=L0.Halt(value="x"),
+                otherwise=L0.Halt(value="y"),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+    def test_load_store_procedure(self):
+        regs = ["r0", "r1", "r2"]
+        proc = L0.Procedure(
+            name="f", parameters=["ptr"],
+            body=L0.Load(
+                destination="val", base="ptr", index=0,
+                then=L0.Store(
+                    base="ptr", index=1, value="val",
+                    then=L0.Halt(value="val"),
+                ),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+
+# ---------------------------------------------------------------------------
+# allocate_program
+# ---------------------------------------------------------------------------
+
+class TestAllocateProgram:
+    def test_all_procedures_allocated(self):
+        regs = ["r0", "r1", "r2"]
         prog = L0.Program(procedures=[
-            L0.Procedure(name="proc1", parameters=[], body=body1),
-            L0.Procedure(name="proc2", parameters=[], body=body2),
+            L0.Procedure(
+                name="f", parameters=["x"],
+                body=L0.Halt(value="x"),
+            ),
+            L0.Procedure(
+                name="g", parameters=["a", "b"],
+                body=L0.Primitive(
+                    destination="c", operator="+", left="a", right="b",
+                    then=L0.Halt(value="c"),
+                ),
+            ),
         ])
-        result = rewrite_program(prog)
+        result = allocate_program(prog, regs)
         assert len(result.procedures) == 2
+        assert result.procedures[0].name == "f"
+        assert result.procedures[1].name == "g"
+
+    def test_output_registers_valid(self):
+        regs = ["r0", "r1", "r2", "r3"]
+        prog = L0.Program(procedures=[
+            L0.Procedure(
+                name="main", parameters=["n"],
+                body=L0.Immediate(
+                    destination="t", value=0,
+                    then=L0.Primitive(
+                        destination="res", operator="+", left="n", right="t",
+                        then=L0.Halt(value="res"),
+                    ),
+                ),
+            ),
+        ])
+        result = allocate_program(prog, regs)
         for proc in result.procedures:
-            for s in all_stmts_reachable(proc.body):
-                gen, kill = get_vars(s)
-                for v in gen | kill:
-                    assert v in REGISTERS, f"{proc.name} still has variable {v}"
+            used = {n for n in _all_registers(proc) if not n.startswith("_slot_")}
+            assert used <= set(regs)
+
+    def test_empty_program(self):
+        result = allocate_program(L0.Program(procedures=[]), REGISTERS)
+        assert result.procedures == []
+
+    def test_procedure_names_preserved(self):
+        regs = ["r0"]
+        prog = L0.Program(procedures=[
+            L0.Procedure(name="alpha", parameters=[], body=L0.Halt(value="x")),
+            L0.Procedure(name="beta",  parameters=[], body=L0.Halt(value="y")),
+        ])
+        result = allocate_program(prog, regs)
+        names = [p.name for p in result.procedures]
+        assert names == ["alpha", "beta"]
+
+# ---------------------------------------------------------------------------
+# Coverage gap tests  (Address, Call, Copy-spill, Branch-spill, Allocate-spill)
+# ---------------------------------------------------------------------------
+
+class TestCoverageGaps:
+    """Targeted tests to hit the branches missing from the coverage report."""
+
+    # ---- Address ----
+
+    def test_address_liveness(self):
+        # Address kills dst, generates nothing
+        stmt = L0.Address(
+            destination="ptr", name="some_proc",
+            then=L0.Halt(value="ptr"),
+        )
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]({"ptr"}))
+        assert "ptr" not in in_sets[0]   # killed by Address
+        assert "ptr" in out_sets[0]      # live after (used by Halt)
+
+    def test_address_interference(self):
+        stmt = L0.Address(
+            destination="ptr", name="f",
+            then=L0.Halt(value="ptr"),
+        )
+        graph = build_interference(stmt, frozenset[str]({"ptr"}))
+        assert "ptr" in graph
+
+    def test_address_apply_allocation(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Address(
+                destination="ptr", name="f",
+                then=L0.Halt(value="ptr"),
+            ),
+        )
+        result = apply_allocation(proc, {"ptr": "r0"})
+        assert isinstance(result.body, L0.Address)
+        assert result.body.destination == "r0"
+
+    def test_address_allocate_procedure(self):
+        regs = ["r0", "r1"]
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Address(
+                destination="ptr", name="f",
+                then=L0.Halt(value="ptr"),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+    # ---- Call ----
+
+    def test_call_liveness(self):
+        # call(target, args) — gen = {target} ∪ args, kill = {}
+        stmt = L0.Call(target="fn", arguments=["a", "b"])
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]())
+        assert "fn" in in_sets[0]
+        assert "a"  in in_sets[0]
+        assert "b"  in in_sets[0]
+        assert out_sets[0] == frozenset[str]()
+
+    def test_call_interference(self):
+        stmt = L0.Call(target="fn", arguments=["x", "y"])
+        graph = build_interference(stmt, frozenset[str]())
+        for v in ("fn", "x", "y"):
+            assert v in graph
+
+    def test_call_apply_allocation(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Call(target="fn", arguments=["a", "b"]),
+        )
+        result = apply_allocation(proc, {"fn": "r0", "a": "r1", "b": "r2"})
+        assert isinstance(result.body, L0.Call)
+        assert result.body.target == "r0"
+        assert list(result.body.arguments) == ["r1", "r2"]
+
+    def test_call_allocate_procedure(self):
+        regs = ["r0", "r1", "r2"]
+        proc = L0.Procedure(
+            name="f", parameters=["fn", "a", "b"],
+            body=L0.Call(target="fn", arguments=["a", "b"]),
+        )
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+    # ---- Copy through spill rewriting ----
+
+    def test_copy_spill_rewrite(self):
+        # x := y; halt(x)  with x spilled — exercises Copy branch in _rewrite_spills_stmt
+        proc = L0.Procedure(
+            name="f", parameters=["y"],
+            body=L0.Copy(
+                destination="x", source="y",
+                then=L0.Halt(value="x"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"x"}), fresh)
+        # Body should start with Allocate for the slot
+        assert isinstance(result.body, L0.Allocate)
+
+    # ---- Branch through spill rewriting ----
+
+    def test_branch_spill_rewrite(self):
+        # if x < y then halt(x) else halt(y)  with x spilled
+        proc = L0.Procedure(
+            name="f", parameters=["x", "y"],
+            body=L0.Branch(
+                operator="<", left="x", right="y",
+                then=L0.Halt(value="x"),
+                otherwise=L0.Halt(value="y"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"x"}), fresh)
+        assert isinstance(result.body, L0.Allocate)
+
+    # ---- Allocate destination through spill rewriting ----
+
+    def test_allocate_dst_spill_rewrite(self):
+        # p := allocate(2); halt(p)  with p spilled
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Allocate(
+                destination="p", count=2,
+                then=L0.Halt(value="p"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"p"}), fresh)
+        assert isinstance(result.body, L0.Allocate)
+
+    # ---- full pipeline with Address and Call ----
+
+    def test_full_pipeline_with_address_and_call(self):
+        regs = ["r0", "r1", "r2"]
+        proc = L0.Procedure(
+            name="f", parameters=["arg"],
+            body=L0.Address(
+                destination="ptr", name="f",
+                then=L0.Call(target="ptr", arguments=["arg"]),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+    # ---- _make_fresh name-collision path ----
+
+    def test_fresh_skips_existing_names(self):
+        # Pre-populate existing with "x_0" so fresh("x") must increment to "x_1"
+        from L0.register_allocation import _make_fresh  # type: ignore[attr-defined]
+        existing: set[str] = {"x_0"}
+        fresh = _make_fresh(existing)
+        name = fresh("x")
+        assert name == "x_1"
+        assert "x_1" in existing
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap tests round 2  (remaining ↛ branches)
+# ---------------------------------------------------------------------------
+
+class TestCoverageGapsRound2:
+
+    # ---- 102 ↛ 104: _flatten Call terminal ----
+
+    def test_flatten_call_terminal(self):
+        # A bare Call (no then) must end up with children=[] in _flatten
+        stmt = L0.Call(target="fn", arguments=["a"])
+        in_sets, out_sets = compute_liveness(stmt, frozenset[str]())
+        # Only one node; out[0] = live_at_end = {}
+        assert len(in_sets) == 1
+        assert out_sets[0] == frozenset[str]()
+
+    # ---- 191 ↛ 192: copy-suppression branch in build_interference ----
+
+    def test_copy_suppression_branch_taken(self):
+        # x := y; halt(x)
+        # At the Copy node: kill={x}, out={x} (x live into Halt).
+        # y is also in out because... actually y is NOT in out here.
+        # We need y to be in out[copy] so the suppression fires.
+        # Add another use: x := y; z := x + y; halt(z)
+        # At Copy: kill={x}, out={x,y} (both used by Primitive).
+        # y is in out and x is killed → would normally add edge x-y,
+        # but copy suppression drops it because y == source.
+        stmt = L0.Copy(
+            destination="x", source="y",
+            then=L0.Primitive(
+                destination="z", operator="+", left="x", right="y",
+                then=L0.Halt(value="z"),
+            ),
+        )
+        graph = build_interference(stmt, frozenset[str]({"z"}))
+        # copy suppression: x and y must NOT interfere
+        assert "y" not in graph.get("x", set[str]())
+        assert "x" not in graph.get("y", set[str]())
+
+    # ---- 282 ↛ 289: Copy with spilled destination ----
+
+    def test_copy_spilled_destination(self):
+        # x := y; halt(x)  with x (destination) spilled
+        proc = L0.Procedure(
+            name="f", parameters=["y"],
+            body=L0.Copy(
+                destination="x", source="y",
+                then=L0.Halt(value="x"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"x"}), fresh)
+        # slot for x allocated at top
+        assert isinstance(result.body, L0.Allocate)
+        # after the slot allocate there must be a Store (writing x's slot)
+        def has_store(s: L0.Statement) -> bool:
+            match s:
+                case L0.Store():
+                    return True
+                case L0.Allocate(then=t) | L0.Copy(then=t) | L0.Immediate(then=t):
+                    return has_store(t)
+                case _:
+                    return False
+        assert has_store(result.body)
+
+    # ---- 302 ↛ 303: Primitive with spilled destination ----
+
+    def test_primitive_spilled_destination(self):
+        # z := x + y; halt(z)  with z (destination) spilled
+        proc = L0.Procedure(
+            name="f", parameters=["x", "y"],
+            body=L0.Primitive(
+                destination="z", operator="+", left="x", right="y",
+                then=L0.Halt(value="z"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"z"}), fresh)
+        assert isinstance(result.body, L0.Allocate)
+
+        def has_store(s: L0.Statement) -> bool:
+            match s:
+                case L0.Store():
+                    return True
+                case L0.Allocate(then=t) | L0.Primitive(then=t) | L0.Immediate(then=t):
+                    return has_store(t)
+                case _:
+                    return False
+        assert has_store(result.body)
+
+    # ---- 330 ↛ 331: Load with spilled destination ----
+
+    def test_load_spilled_destination(self):
+        # v := load(ptr, 0); halt(v)  with v (destination) spilled
+        proc = L0.Procedure(
+            name="f", parameters=["ptr"],
+            body=L0.Load(
+                destination="v", base="ptr", index=0,
+                then=L0.Halt(value="v"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"v"}), fresh)
+        assert isinstance(result.body, L0.Allocate)
+
+        def has_store(s: L0.Statement) -> bool:
+            match s:
+                case L0.Store():
+                    return True
+                case L0.Allocate(then=t) | L0.Load(then=t) | L0.Immediate(then=t):
+                    return has_store(t)
+                case _:
+                    return False
+        assert has_store(result.body)
+
+    # ---- 346 ↛ 347: Address with spilled destination ----
+
+    def test_address_spilled_destination(self):
+        # ptr := &f; halt(ptr)  with ptr (destination) spilled
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Address(
+                destination="ptr", name="f",
+                then=L0.Halt(value="ptr"),
+            ),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"ptr"}), fresh)
+        assert isinstance(result.body, L0.Allocate)
+
+        def has_store(s: L0.Statement) -> bool:
+            match s:
+                case L0.Store():
+                    return True
+                case L0.Allocate(then=t) | L0.Address(then=t) | L0.Immediate(then=t):
+                    return has_store(t)
+                case _:
+                    return False
+        assert has_store(result.body)
+
+    # ---- 354 ↛ 355: Call with spilled target/arguments ----
+
+    def test_call_spilled_target(self):
+        # call(fn, [a])  with fn spilled
+        proc = L0.Procedure(
+            name="f", parameters=["fn", "a"],
+            body=L0.Call(target="fn", arguments=["a"]),
+        )
+        fresh = _make_fresh()
+        result = rewrite_spills(proc, frozenset[str]({"fn"}), fresh)
+        assert isinstance(result.body, L0.Allocate)
+
+        def has_load_before_call(s: L0.Statement) -> bool:
+            match s:
+                case L0.Load(then=L0.Call()):
+                    return True
+                case L0.Allocate(then=t) | L0.Load(then=t):
+                    return has_load_before_call(t)
+                case _:
+                    return False
+        assert has_load_before_call(result.body)
+
+    # ---- 406 ↛ 407: apply_allocation Copy ----
+
+    def test_apply_allocation_copy(self):
+        proc = L0.Procedure(
+            name="f", parameters=[],
+            body=L0.Copy(
+                destination="x", source="y",
+                then=L0.Halt(value="x"),
+            ),
+        )
+        result = apply_allocation(proc, {"x": "r0", "y": "r1"})
+        assert isinstance(result.body, L0.Copy)
+        assert result.body.destination == "r0"
+        assert result.body.source == "r1"
+
+    # ---- 446 ↛ 447: _all_names Copy (via allocate_procedure) ----
+
+    def test_all_names_copy_via_pipeline(self):
+        # A procedure with a Copy triggers _all_names Copy branch
+        regs = ["r0", "r1", "r2"]
+        proc = L0.Procedure(
+            name="f", parameters=["y"],
+            body=L0.Copy(
+                destination="x", source="y",
+                then=L0.Halt(value="x"),
+            ),
+        )
+        result = allocate_procedure(proc, regs)
+        used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
+        assert used <= set(regs)
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap tests round 3  (final 3 missing branches)
+# ---------------------------------------------------------------------------
+
+class TestCoverageGapsRound3:
+
+    # ---- 102 ↛ 104: Call reached as a child node (not root) ----
+
+    def test_flatten_call_as_child(self):
+        # Address(then=Call(...)) — Call is a child, not the root
+        # This forces walk() to recurse into a Call terminal
+        stmt = L0.Address(
+            destination="ptr", name="f",
+            then=L0.Call(target="ptr", arguments=["a"]),
+        )
+        in_sets, _ = compute_liveness(stmt, frozenset[str]())
+        # Two nodes: Address(0) and Call(1)
+        assert len(in_sets) == 2
+        assert "ptr" in in_sets[1]
+        assert "a"   in in_sets[1]
+
+    # ---- 282 ↛ 289: Copy with spilled destination, called directly ----
+
+    def test_copy_spilled_destination_direct(self):
+        from L0.register_allocation import _rewrite_spills_stmt  # type: ignore[attr-defined]
+        fresh = _make_fresh()
+        slot_x = fresh("_slot_x")
+        slots = {"x": slot_x}
+        stmt = L0.Copy(
+            destination="x", source="y",
+            then=L0.Halt(value="x"),
+        )
+        result = _rewrite_spills_stmt(stmt, slots, fresh)
+        # Should be a Copy into a tmp, then a Store into the slot
+        assert isinstance(result, L0.Copy)
+        assert result.destination != "x"         # renamed to tmp
+        assert isinstance(result.then, L0.Store) # store tmp → slot
+        assert result.then.base == slot_x
+
+    # ---- 347 ↛ 352: Address with non-spilled destination (else branch) ----
+
+    def test_address_non_spilled_destination(self):
+        from L0.register_allocation import _rewrite_spills_stmt  # type: ignore[attr-defined]
+        fresh = _make_fresh()
+        # ptr is NOT spilled — only "other" is in slots
+        slot_other = fresh("_slot_other")
+        slots = {"other": slot_other}
+        stmt = L0.Address(
+            destination="ptr", name="f",
+            then=L0.Halt(value="ptr"),
+        )
+        result = _rewrite_spills_stmt(stmt, slots, fresh)
+        # dst not spilled → Address passes through unchanged (destination="ptr")
+        assert isinstance(result, L0.Address)
+        assert result.destination == "ptr"
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap tests round 4  (final 2 missing branches)
+# ---------------------------------------------------------------------------
+
+class TestCoverageGapsRound4:
+
+    # ---- 289: Copy where src is spilled but dst is not ----
+
+    def test_copy_spilled_source_not_destination(self):
+        from L0.register_allocation import _rewrite_spills_stmt  # type: ignore[attr-defined]
+        fresh = _make_fresh()
+        slot_y = fresh("_slot_y")
+        # only y (source) is spilled, not x (destination)
+        slots = {"y": slot_y}
+        stmt = L0.Copy(
+            destination="x", source="y",
+            then=L0.Halt(value="x"),
+        )
+        result = _rewrite_spills_stmt(stmt, slots, fresh)
+        # wrap_src fires: Load y from slot, then Copy into x (unspilled dst)
+        assert isinstance(result, L0.Load)           # load y first
+        assert result.base == slot_y
+        assert isinstance(result.then, L0.Copy)      # then copy into x
+        assert result.then.destination == "x"
