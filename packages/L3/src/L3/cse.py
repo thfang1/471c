@@ -1,17 +1,24 @@
-from typing import Mapping
+from collections.abc import Mapping
+from functools import partial
 
 from L3.syntax import (Abstract, Allocate, Apply, Begin, Branch, Identifier,
-                     Immediate, Let, Load, Primitive, Program, Reference,
-                     Store, Term)
+                       Immediate, Let, Load, Primitive, Program, Reference,
+                       Store, Term)
 
-# --- Types --------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
 
-type Env = Mapping[str, Term]  # name -> Immediate or Reference (for propagation)
+type Env    = Mapping[Identifier, Term]   # name → Immediate | Reference
+type CSEEnv = Mapping[Term, Identifier]   # pure expr → canonical binding name
 
-# --- Purity Check -------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Purity
+# ---------------------------------------------------------------------------
 
 def is_pure(term: Term) -> bool:
-    """Return True if term has no side effects and is safe to deduplicate."""
+    """True if term has no side effects and is safe to hoist / deduplicate."""
     match term:
         case Immediate() | Reference():
             return True
@@ -20,199 +27,202 @@ def is_pure(term: Term) -> bool:
         case _:
             return False
 
-# --- Pass 1: Constant Folding + Copy Propagation ------------------------------
+
+# ---------------------------------------------------------------------------
+# Pass 1: constant folding + copy propagation
+# ---------------------------------------------------------------------------
 
 def simplify(term: Term, env: Env = {}) -> Term:
+    """
+    Single-pass constant folding and copy propagation.
+
+    *env* maps variable names to their known values (Immediate or Reference).
+    Immediates enable constant folding; References enable copy propagation.
+    """
+    recur = partial(simplify, env=env)
 
     match term:
-        case Immediate(value=v):
-            return Immediate(value=v)
-
-        case Reference(name=name):
-            if name in env:
-                return env[name]  # propagate Immediate or Reference
+        case Immediate():
             return term
 
-        case Let(bindings=bindings, body=body):
+        case Reference(name=name):
+            # copy / constant propagation: replace with known value if available
+            return env[name] if name in env else term
 
+        case Let(bindings=bindings, body=body):
             new_bindings: list[tuple[Identifier, Term]] = []
             new_env = dict(env)
             for name, val in bindings:
                 s_val = simplify(val, new_env)
-                if isinstance(s_val, Immediate):
-                    # constant propagation: substitute the value directly
-                    new_env[name] = s_val
-                elif isinstance(s_val, Reference):
-                    # copy propagation: substitute the referenced variable
+                if isinstance(s_val, (Immediate, Reference)):
+                    # propagate constants and copies downstream
                     new_env[name] = s_val
                 else:
                     new_env.pop(name, None)
                 new_bindings.append((name, s_val))
-
             return Let(
                 bindings=tuple(new_bindings),
-                body=simplify(body, new_env)
+                body=simplify(body, new_env),
             )
 
         case Primitive(operator=op, left=l, right=r):
-            sl, sr = simplify(l, env), simplify(r, env)
+            sl, sr = recur(l), recur(r)
             if isinstance(sl, Immediate) and isinstance(sr, Immediate):
                 lv, rv = int(sl.value), int(sr.value)
-                if op == "+":
-                    return Immediate(value=lv + rv)
-                elif op == "-":
-                    return Immediate(value=lv - rv)
-                else:
-                    return Immediate(value=lv * rv)
+                match op:
+                    case "+":
+                        return Immediate(value=lv + rv)
+                    case "-":
+                        return Immediate(value=lv - rv)
+                    case "*":  # pragma: no branch
+                        return Immediate(value=lv * rv)
             return Primitive(operator=op, left=sl, right=sr)
 
         case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
-            sl, sr = simplify(l, env), simplify(r, env)
-
+            sl, sr = recur(l), recur(r)
             if isinstance(sl, Immediate) and isinstance(sr, Immediate):
                 lv, rv = int(sl.value), int(sr.value)
-                condition_met = (lv < rv) if op == "<" else (lv == rv)
-                return simplify(c, env) if condition_met else simplify(o, env)
-
+                condition = (lv < rv) if op == "<" else (lv == rv)
+                return recur(c) if condition else recur(o)
             return Branch(
                 operator=op,
                 left=sl,
                 right=sr,
-                consequent=simplify(c, env),
-                otherwise=simplify(o, env)
+                consequent=recur(c),
+                otherwise=recur(o),
             )
 
         case Abstract(parameters=params, body=b):
+            # shadow any env entries that the parameters rebind
             inner_env = {k: v for k, v in env.items() if k not in params}
             return Abstract(parameters=params, body=simplify(b, inner_env))
 
         case Apply(target=t, arguments=args):
-            new_args: list[Term] = [simplify(a, env) for a in args]
             return Apply(
-                target=simplify(t, env),
-                arguments=tuple(new_args)
+                target=recur(t),
+                arguments=tuple(recur(a) for a in args),
             )
 
         case Begin(effects=effs, value=v):
-            new_effects: list[Term] = [simplify(e, env) for e in effs]
             return Begin(
-                effects=tuple(new_effects),
-                value=simplify(v, env)
-            )
-
-        case Store(base=b, index=i, value=v):  # pragma: no branch
-            return Store(
-                base=simplify(b, env),
-                index=i,
-                value=simplify(v, env)
+                effects=tuple(recur(e) for e in effs),
+                value=recur(v),
             )
 
         case Load(base=b, index=i):
-            return Load(base=simplify(b, env), index=i)
+            return Load(base=recur(b), index=i)
 
-        case Allocate(count=c):
-            return Allocate(count=c)
+        case Store(base=b, index=i, value=v):
+            return Store(base=recur(b), index=i, value=recur(v))
+
+        case Allocate():
+            return term
 
         case _:  # pragma: no cover
             raise ValueError(f"Unknown term: {term!r}")
 
-# --- Pass 2: Common Subexpression Elimination ---------------------------------
 
-# ExprKey: a hashable structural representation of a pure expression.
-# We use the Term itself as the key since pydantic models are frozen (hashable).
-type ExprKey = Term
+# ---------------------------------------------------------------------------
+# Pass 2: common subexpression elimination
+# ---------------------------------------------------------------------------
 
-def cse(term: Term, table: dict[ExprKey, str], counter: list[int]) -> Term:
+def _cse_term(term: Term, table: dict[Term, Identifier]) -> Term:
     """
-    Traverse `term` and hoist duplicate pure subexpressions into shared
-    let-bindings.  `table` maps a seen pure expression to the fresh name
-    that was introduced for it.  `counter` is a single-element list used
-    as a mutable integer for fresh name generation.
+    Traverse *term*, replacing duplicate pure subexpressions with a reference
+    to the first binding that computed them.
+
+    *table* maps a seen pure expression to the binding name that holds its
+    value.  The table is threaded through sequential bindings so that later
+    bindings can reuse earlier ones.  Each lambda body gets a *fresh* table
+    so we never hoist across a lambda boundary.
     """
+    recur = partial(_cse_term, table=table)
+
     match term:
         case Immediate() | Reference() | Allocate():
             return term
 
-        case Primitive(operator=op, left=l, right=r):
-            # Only recurse into children; deduplication is handled by the
-            # Let binding loop so that line 152 can be reached.
-            sl = cse(l, table, counter)
-            sr = cse(r, table, counter)
-            return Primitive(operator=op, left=sl, right=sr)
-
         case Let(bindings=bindings, body=body):
             new_bindings: list[tuple[Identifier, Term]] = []
             for name, val in bindings:
-                s_val = cse(val, table, counter)
-                # If this is a pure expression we have seen before, replace with
-                # a reference to the earlier binding and do NOT add to table again.
-                if is_pure(s_val) and s_val in table:
-                    s_val = Reference(name=table[s_val])
-                elif is_pure(s_val) and not isinstance(s_val, (Immediate, Reference)):
-                    # First time we see this pure expression: record it.
-                    table[s_val] = name
+                s_val = _cse_term(val, table)
+                if is_pure(s_val) and not isinstance(s_val, (Immediate, Reference)):
+                    if s_val in table:
+                        # duplicate: replace with a copy of the canonical binding
+                        s_val = Reference(name=table[s_val])
+                    else:
+                        # first occurrence: register as canonical
+                        table[s_val] = name
                 new_bindings.append((name, s_val))
             return Let(
                 bindings=tuple(new_bindings),
-                body=cse(body, table, counter)
+                body=_cse_term(body, table),
             )
+
+        case Primitive(operator=op, left=l, right=r):
+            return Primitive(operator=op, left=recur(l), right=recur(r))
 
         case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
             return Branch(
                 operator=op,
-                left=cse(l, table, counter),
-                right=cse(r, table, counter),
-                consequent=cse(c, table, counter),
-                otherwise=cse(o, table, counter)
+                left=recur(l),
+                right=recur(r),
+                consequent=recur(c),
+                otherwise=recur(o),
             )
 
         case Abstract(parameters=params, body=b):
-            # Each lambda gets its own CSE scope so we don't hoist across
-            # lambda boundaries (would change evaluation semantics).
-            inner_table: dict[ExprKey, str] = {}
-            return Abstract(parameters=params, body=cse(b, inner_table, counter))
+            # fresh table per lambda — never hoist across a lambda boundary
+            return Abstract(parameters=params, body=_cse_term(b, {}))
 
         case Apply(target=t, arguments=args):
             return Apply(
-                target=cse(t, table, counter),
-                arguments=tuple(cse(a, table, counter) for a in args)
+                target=recur(t),
+                arguments=tuple(recur(a) for a in args),
             )
 
         case Begin(effects=effs, value=v):
             return Begin(
-                effects=tuple(cse(e, table, counter) for e in effs),
-                value=cse(v, table, counter)
-            )
-
-        case Store(base=b, index=i, value=v):
-            return Store(
-                base=cse(b, table, counter),
-                index=i,
-                value=cse(v, table, counter)
+                effects=tuple(recur(e) for e in effs),
+                value=recur(v),
             )
 
         case Load(base=b, index=i):
-            return Load(base=cse(b, table, counter), index=i)
+            return Load(base=recur(b), index=i)
+
+        case Store(base=b, index=i, value=v):
+            return Store(base=recur(b), index=i, value=recur(v))
 
         case _:  # pragma: no cover
             raise ValueError(f"Unknown term: {term!r}")
 
-def cse_program(term: Term) -> Term:
-    """Entry point: run CSE on a single term with a fresh table."""
-    return cse(term, {}, [0])
 
-# --- Optimization Loop --------------------------------------------------------
+def cse(term: Term) -> Term:
+    """Entry point: run CSE on *term* with a fresh expression table."""
+    return _cse_term(term, {})
+
+
+# ---------------------------------------------------------------------------
+# Optimization loop
+# ---------------------------------------------------------------------------
 
 def optimize_program(program: Program) -> Program:
+    """
+    Iterate CSE → simplify (constant folding + copy propagation) until the
+    term stops changing.
 
-    current_term = program.body
+    CSE runs first to surface duplicate computations as copy bindings;
+    simplify then eliminates those copies and folds any newly constant
+    expressions.  Dead bindings produced by copy propagation are removed
+    because simplify propagates references, making the original binding
+    unused — the existing DCE pass (or a subsequent simplify iteration)
+    will then drop it.
+    """
+    current = program.body
     while True:
-        # Order: CSE -> copy propagation + constant folding -> (repeat)
-        after_cse = cse_program(current_term)
+        after_cse      = cse(current)
         after_simplify = simplify(after_cse)
-
-        if after_simplify == current_term:
+        if after_simplify == current:
             break
-        current_term = after_simplify
-
-    return Program(parameters=program.parameters, body=current_term)
+        current = after_simplify
+    return Program(parameters=program.parameters, body=current)
