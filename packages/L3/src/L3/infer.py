@@ -9,10 +9,6 @@ from .syntax import (Abstract, Allocate, Apply, Begin, Branch, Identifier,
                      Reference, Store, Term)
 
 
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
 class IntType(BaseModel, frozen=True):
     tag: Literal["int"] = "int"
 
@@ -58,10 +54,6 @@ class Scheme(BaseModel, frozen=True):
     quantified: frozenset[int]
     body: Type
 
-
-# ---------------------------------------------------------------------------
-# Substitution helpers
-# ---------------------------------------------------------------------------
 
 def apply_sub(sub: Substitution, t: Type) -> Type:
     match t:
@@ -113,10 +105,6 @@ def unify(t1: Type, t2: Type, sub: Substitution) -> dict[int, Type]:
             raise TypeError(f"Type mismatch: {t1} vs {t2}")
 
 
-# ---------------------------------------------------------------------------
-# Fresh type-variable generator
-# ---------------------------------------------------------------------------
-
 def make_type_var_fresh() -> Callable[[], TypeVar]:
     n = [0]
 
@@ -127,10 +115,6 @@ def make_type_var_fresh() -> Callable[[], TypeVar]:
 
     return fresh
 
-
-# ---------------------------------------------------------------------------
-# Generalisation / instantiation
-# ---------------------------------------------------------------------------
 
 def free_vars(t: Type) -> frozenset[int]:
     match t:
@@ -162,10 +146,6 @@ def instantiate(scheme: Scheme, fresh: Callable[[], TypeVar]) -> Type:
     mapping: dict[int, Type] = {i: fresh() for i in scheme.quantified}
     return apply_sub(mapping, scheme.body)
 
-
-# ---------------------------------------------------------------------------
-# Term inference
-# ---------------------------------------------------------------------------
 
 def infer_term(
     term: Term,
@@ -222,9 +202,6 @@ def infer_term(
             return infer_term(b, new_env, sub, fresh)
 
         case LetRec(bindings=bs, body=b):
-            # Give each binding a fresh type variable, infer under the
-            # extended environment, then unify the inferred type with the
-            # placeholder.  This handles mutually recursive definitions.
             new_env = dict(env)
             placeholders: dict[Identifier, TypeVar] = {}
             for n, _ in bs:
@@ -268,10 +245,6 @@ def infer_term(
                 _, sub = infer_term(e, env, sub, fresh)
             return infer_term(v, env, sub, fresh)
 
-
-# ---------------------------------------------------------------------------
-# Program inference
-# ---------------------------------------------------------------------------
 
 def infer_program(program: Program) -> tuple[Type, dict[int, Type]]:
     fresh = make_type_var_fresh()

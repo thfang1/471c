@@ -3,10 +3,6 @@ from functools import partial
 
 from L0 import syntax as L0
 
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
 type Identifier = str
 type Register   = str
 type Graph      = Mapping[Identifier, frozenset[Identifier]]
@@ -17,10 +13,6 @@ REGISTERS: tuple[Register, ...] = (
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
 )
 
-
-# ---------------------------------------------------------------------------
-# Liveness
-# ---------------------------------------------------------------------------
 
 def _gen(stmt: L0.Statement) -> frozenset[Identifier]:
     match stmt:
@@ -74,18 +66,12 @@ def _live_in(
     stmt: L0.Statement,
     live_out: frozenset[Identifier],
 ) -> frozenset[Identifier]:
-    """in[i] = gen[i] ∪ (out[i] − kill[i])"""
     return _gen(stmt) | (live_out - _kill(stmt))
 
 
 def _flatten(
     stmt: L0.Statement,
 ) -> tuple[list[L0.Statement], dict[int, list[int]]]:
-    """
-    Depth-first pre-order traversal of the statement tree.
-    Returns (nodes, children) where children[i] holds the successor indices
-    of nodes[i].
-    """
     nodes:    list[L0.Statement]   = []
     children: dict[int, list[int]] = {}
 
@@ -113,14 +99,7 @@ def compute_liveness(
     stmt: L0.Statement,
     live_at_end: frozenset[Identifier],
 ) -> tuple[Mapping[int, frozenset[Identifier]], Mapping[int, frozenset[Identifier]]]:
-    """
-    Compute in[i] and out[i] for every node in the statement tree via
-    backward fixed-point iteration (equations 9.1 and 9.2 from the textbook).
 
-    Terminals receive *live_at_end* as their out set.
-
-    Returns (in_sets, out_sets) both indexed by pre-order position.
-    """
     nodes, children = _flatten(stmt)
     n = len(nodes)
 
@@ -151,10 +130,6 @@ def compute_liveness(
     return in_sets, out
 
 
-# ---------------------------------------------------------------------------
-# Interference graph
-# ---------------------------------------------------------------------------
-
 def _add_edge(
     graph: dict[Identifier, set[Identifier]],
     x: Identifier,
@@ -168,13 +143,6 @@ def build_interference(
     stmt: L0.Statement,
     live_at_end: frozenset[Identifier],
 ) -> Graph:
-    """
-    Build the interference graph for a procedure body.
-
-    Definition 9.2: x interferes with y when
-        x ∈ kill[i],  y ∈ out[i],  x ≠ y,
-        and the instruction is not a plain copy  x := y.
-    """
     nodes, _ = _flatten(stmt)
     _, out_sets  = compute_liveness(stmt, live_at_end)
 
@@ -197,26 +165,11 @@ def build_interference(
     return {v: frozenset(nbrs) for v, nbrs in graph.items()}
 
 
-# ---------------------------------------------------------------------------
-# Graph colouring  (Algorithm 9.3)
-# ---------------------------------------------------------------------------
-
 def color_graph(
     graph: Graph,
     registers: Sequence[Register],
     precolored: Coloring,
 ) -> tuple[Coloring, frozenset[Identifier]]:
-    """
-    Optimistic graph colouring (Algorithm 9.3).
-
-    simplify: repeatedly remove a node with < N edges (or, if none exists,
-              the node with the most edges as a spill candidate — §9.7).
-    select:   re-insert nodes from the stack, assigning the lowest available
-              register
-              mark as spilled if none is available.
-
-    Precolored nodes are never removed during simplify.
-    """
     n = len(registers)
 
     remaining: dict[Identifier, set[Identifier]] = {
@@ -224,7 +177,6 @@ def color_graph(
     }
     stack: list[tuple[Identifier, frozenset[Identifier]]] = []
 
-    # ---- simplify ----
     while True:
         candidates = [v for v in remaining if v not in precolored]
         if not candidates:
@@ -240,7 +192,6 @@ def color_graph(
         for nb in nbrs:
             remaining[nb].discard(chosen)
 
-    # ---- select ----
     coloring: dict[Identifier, Register] = dict(precolored)
     spilled:  set[Identifier]            = set()
 
@@ -255,25 +206,18 @@ def color_graph(
     return coloring, frozenset(spilled)
 
 
-# ---------------------------------------------------------------------------
-# Spill rewriting
-# ---------------------------------------------------------------------------
 
 def _rewrite_spills_stmt(
     stmt: L0.Statement,
     slots: Mapping[Identifier, Identifier],
     fresh: Callable[[str], str],
 ) -> L0.Statement:
-    """
-    Rewrite *stmt* so that every read/write of a spilled variable goes
-    through its heap-allocated slot pointer.
-    """
+
     recur = partial(_rewrite_spills_stmt, slots=slots, fresh=fresh)
 
     def load_if_spilled(
         name: Identifier,
     ) -> tuple[Identifier, Callable[[L0.Statement], L0.Statement]]:
-        """Return (local_name, wrap) where wrap injects a Load if name is spilled."""
         if name in slots:
             tmp = fresh(name)
             return tmp, lambda cont: L0.Load(destination=tmp, base=slots[name], index=0, then=cont)
@@ -373,10 +317,6 @@ def rewrite_spills(
     spilled: frozenset[Identifier],
     fresh: Callable[[str], str],
 ) -> L0.Procedure:
-    """
-    Allocate a heap slot for every spilled variable and rewrite the
-    procedure body to load/store through those slots.
-    """
     slots: dict[Identifier, Identifier] = {
         x: fresh(f"_slot_{x}") for x in sorted(spilled)
     }
@@ -392,15 +332,10 @@ def rewrite_spills(
     )
 
 
-# ---------------------------------------------------------------------------
-# Apply allocation
-# ---------------------------------------------------------------------------
-
 def apply_allocation(
     procedure: L0.Procedure,
     coloring: Coloring,
 ) -> L0.Procedure:
-    """Rename every identifier in the procedure body to its assigned register."""
     def r(name: Identifier) -> Register:
         return coloring.get(name, name)
 
@@ -436,10 +371,6 @@ def apply_allocation(
         body=rewrite(procedure.body),
     )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _all_names(stmt: L0.Statement) -> set[Identifier]:
     acc: set[Identifier] = set()
@@ -496,27 +427,10 @@ def _make_fresh(existing: set[Identifier]) -> Callable[[str], str]:
     return fresh
 
 
-# ---------------------------------------------------------------------------
-# Procedure and program entry points
-# ---------------------------------------------------------------------------
-
 def allocate_procedure(
     procedure: L0.Procedure,
     registers: Sequence[Register],
 ) -> L0.Procedure:
-    """
-    Full register-allocation pipeline for a single L0 Procedure.
-
-    Iterates: liveness → interference → colouring → spill-rewrite
-    until no variables remain spilled.
-
-    Procedure parameters are pre-colored to registers[0..k-1],
-    matching the calling convention (arguments arrive in r0, r1, …).
-
-    Spill-slot pointer variables (injected by rewrite_spills) are tracked in
-    *protected* so they are never chosen for spilling again, which would
-    otherwise cause unbounded slot-of-slot recursion.
-    """
     existing  = _all_names(procedure.body) | set(procedure.parameters)
     fresh     = _make_fresh(existing)
     current   = procedure
@@ -549,6 +463,5 @@ def allocate_program(
     program: L0.Program,
     registers: Sequence[Register],
 ) -> L0.Program:
-    """Apply register allocation to every Procedure in an L0 Program."""
     _allocate = partial(allocate_procedure, registers=registers)
     return L0.Program(procedures=[_allocate(proc) for proc in program.procedures])

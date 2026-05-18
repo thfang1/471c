@@ -11,10 +11,6 @@ from L0.register_allocation import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _make_fresh():
     count = [0]
     existing: set[str] = set()
@@ -31,7 +27,6 @@ def _make_fresh():
 
 
 def _all_registers(proc: L0.Procedure) -> set[str]:
-    """Collect every identifier that appears in the procedure body."""
     acc: set[str] = set()
 
     def walk(s: L0.Statement) -> None:
@@ -72,10 +67,6 @@ def _all_registers(proc: L0.Procedure) -> set[str]:
     return acc
 
 
-# ---------------------------------------------------------------------------
-# REGISTERS constant
-# ---------------------------------------------------------------------------
-
 class TestRegisters:
     def test_is_tuple_of_strings(self):
         assert isinstance(REGISTERS, tuple)
@@ -87,10 +78,6 @@ class TestRegisters:
     def test_unique(self):
         assert len(REGISTERS) == len(set(REGISTERS))
 
-
-# ---------------------------------------------------------------------------
-# compute_liveness
-# ---------------------------------------------------------------------------
 
 class TestComputeLiveness:
     def test_halt_live_in(self):
@@ -207,10 +194,6 @@ class TestComputeLiveness:
         assert len(in_sets) == len(out_sets) == 2
 
 
-# ---------------------------------------------------------------------------
-# build_interference
-# ---------------------------------------------------------------------------
-
 class TestBuildInterference:
     def test_two_simultaneously_live_vars_interfere(self):
         # a := 1; b := 2; halt(a)   — b is live at halt? No.
@@ -299,10 +282,6 @@ class TestBuildInterference:
         for v, nbrs in graph.items():
             assert v not in nbrs, f"self-loop on {v}"
 
-
-# ---------------------------------------------------------------------------
-# color_graph
-# ---------------------------------------------------------------------------
 
 class TestColorGraph:
     def test_empty_graph(self):
@@ -396,10 +375,6 @@ class TestColorGraph:
         assert len(set(coloring.values())) == 3
 
 
-# ---------------------------------------------------------------------------
-# rewrite_spills
-# ---------------------------------------------------------------------------
-
 class TestRewriteSpills:
     def test_spilled_immediate_gets_store(self):
         # x := 42; halt(x)  with x spilled
@@ -487,10 +462,6 @@ class TestRewriteSpills:
         assert list(result.parameters) == ["p"]
 
 
-# ---------------------------------------------------------------------------
-# apply_allocation
-# ---------------------------------------------------------------------------
-
 class TestApplyAllocation:
     def test_renames_halt_value(self):
         proc = L0.Procedure(
@@ -554,10 +525,6 @@ class TestApplyAllocation:
         result = apply_allocation(proc, {"x": "r0"})
         assert result.name == "my_proc"
 
-
-# ---------------------------------------------------------------------------
-# allocate_procedure  (full pipeline)
-# ---------------------------------------------------------------------------
 
 class TestAllocateProcedure:
     def test_output_uses_only_valid_registers(self):
@@ -686,10 +653,6 @@ class TestAllocateProcedure:
         assert used <= set(regs)
 
 
-# ---------------------------------------------------------------------------
-# allocate_program
-# ---------------------------------------------------------------------------
-
 class TestAllocateProgram:
     def test_all_procedures_allocated(self):
         regs = ["r0", "r1", "r2"]
@@ -744,10 +707,6 @@ class TestAllocateProgram:
         names = [p.name for p in result.procedures]
         assert names == ["alpha", "beta"]
 
-# ---------------------------------------------------------------------------
-# Coverage gap tests  (Address, Call, Copy-spill, Branch-spill, Allocate-spill)
-# ---------------------------------------------------------------------------
-
 class TestCoverageGaps:
     """Targeted tests to hit the branches missing from the coverage report."""
 
@@ -796,7 +755,6 @@ class TestCoverageGaps:
         used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
         assert used <= set(regs)
 
-    # ---- Call ----
 
     def test_call_liveness(self):
         # call(target, args) — gen = {target} ∪ args, kill = {}
@@ -833,8 +791,6 @@ class TestCoverageGaps:
         used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
         assert used <= set(regs)
 
-    # ---- Copy through spill rewriting ----
-
     def test_copy_spill_rewrite(self):
         # x := y; halt(x)  with x spilled — exercises Copy branch in _rewrite_spills_stmt
         proc = L0.Procedure(
@@ -849,7 +805,6 @@ class TestCoverageGaps:
         # Body should start with Allocate for the slot
         assert isinstance(result.body, L0.Allocate)
 
-    # ---- Branch through spill rewriting ----
 
     def test_branch_spill_rewrite(self):
         # if x < y then halt(x) else halt(y)  with x spilled
@@ -865,7 +820,7 @@ class TestCoverageGaps:
         result = rewrite_spills(proc, frozenset[str]({"x"}), fresh)
         assert isinstance(result.body, L0.Allocate)
 
-    # ---- Allocate destination through spill rewriting ----
+
 
     def test_allocate_dst_spill_rewrite(self):
         # p := allocate(2); halt(p)  with p spilled
@@ -880,7 +835,7 @@ class TestCoverageGaps:
         result = rewrite_spills(proc, frozenset[str]({"p"}), fresh)
         assert isinstance(result.body, L0.Allocate)
 
-    # ---- full pipeline with Address and Call ----
+
 
     def test_full_pipeline_with_address_and_call(self):
         regs = ["r0", "r1", "r2"]
@@ -895,7 +850,6 @@ class TestCoverageGaps:
         used = {n for n in _all_registers(result) if not n.startswith("_slot_")}
         assert used <= set(regs)
 
-    # ---- _make_fresh name-collision path ----
 
     def test_fresh_skips_existing_names(self):
         # Pre-populate existing with "x_0" so fresh("x") must increment to "x_1"
@@ -907,13 +861,8 @@ class TestCoverageGaps:
         assert "x_1" in existing
 
 
-# ---------------------------------------------------------------------------
-# Coverage gap tests round 2  (remaining ↛ branches)
-# ---------------------------------------------------------------------------
-
 class TestCoverageGapsRound2:
 
-    # ---- 102 ↛ 104: _flatten Call terminal ----
 
     def test_flatten_call_terminal(self):
         # A bare Call (no then) must end up with children=[] in _flatten
@@ -923,17 +872,8 @@ class TestCoverageGapsRound2:
         assert len(in_sets) == 1
         assert out_sets[0] == frozenset[str]()
 
-    # ---- 191 ↛ 192: copy-suppression branch in build_interference ----
 
     def test_copy_suppression_branch_taken(self):
-        # x := y; halt(x)
-        # At the Copy node: kill={x}, out={x} (x live into Halt).
-        # y is also in out because... actually y is NOT in out here.
-        # We need y to be in out[copy] so the suppression fires.
-        # Add another use: x := y; z := x + y; halt(z)
-        # At Copy: kill={x}, out={x,y} (both used by Primitive).
-        # y is in out and x is killed → would normally add edge x-y,
-        # but copy suppression drops it because y == source.
         stmt = L0.Copy(
             destination="x", source="y",
             then=L0.Primitive(
@@ -946,7 +886,6 @@ class TestCoverageGapsRound2:
         assert "y" not in graph.get("x", set[str]())
         assert "x" not in graph.get("y", set[str]())
 
-    # ---- 282 ↛ 289: Copy with spilled destination ----
 
     def test_copy_spilled_destination(self):
         # x := y; halt(x)  with x (destination) spilled
@@ -972,7 +911,6 @@ class TestCoverageGapsRound2:
                     return False
         assert has_store(result.body)
 
-    # ---- 302 ↛ 303: Primitive with spilled destination ----
 
     def test_primitive_spilled_destination(self):
         # z := x + y; halt(z)  with z (destination) spilled
@@ -997,7 +935,6 @@ class TestCoverageGapsRound2:
                     return False
         assert has_store(result.body)
 
-    # ---- 330 ↛ 331: Load with spilled destination ----
 
     def test_load_spilled_destination(self):
         # v := load(ptr, 0); halt(v)  with v (destination) spilled
@@ -1022,7 +959,6 @@ class TestCoverageGapsRound2:
                     return False
         assert has_store(result.body)
 
-    # ---- 346 ↛ 347: Address with spilled destination ----
 
     def test_address_spilled_destination(self):
         # ptr := &f; halt(ptr)  with ptr (destination) spilled
@@ -1047,7 +983,6 @@ class TestCoverageGapsRound2:
                     return False
         assert has_store(result.body)
 
-    # ---- 354 ↛ 355: Call with spilled target/arguments ----
 
     def test_call_spilled_target(self):
         # call(fn, [a])  with fn spilled
@@ -1069,7 +1004,6 @@ class TestCoverageGapsRound2:
                     return False
         assert has_load_before_call(result.body)
 
-    # ---- 406 ↛ 407: apply_allocation Copy ----
 
     def test_apply_allocation_copy(self):
         proc = L0.Procedure(
@@ -1084,7 +1018,6 @@ class TestCoverageGapsRound2:
         assert result.body.destination == "r0"
         assert result.body.source == "r1"
 
-    # ---- 446 ↛ 447: _all_names Copy (via allocate_procedure) ----
 
     def test_all_names_copy_via_pipeline(self):
         # A procedure with a Copy triggers _all_names Copy branch
@@ -1101,13 +1034,8 @@ class TestCoverageGapsRound2:
         assert used <= set(regs)
 
 
-# ---------------------------------------------------------------------------
-# Coverage gap tests round 3  (final 3 missing branches)
-# ---------------------------------------------------------------------------
-
 class TestCoverageGapsRound3:
 
-    # ---- 102 ↛ 104: Call reached as a child node (not root) ----
 
     def test_flatten_call_as_child(self):
         # Address(then=Call(...)) — Call is a child, not the root
@@ -1121,8 +1049,6 @@ class TestCoverageGapsRound3:
         assert len(in_sets) == 2
         assert "ptr" in in_sets[1]
         assert "a"   in in_sets[1]
-
-    # ---- 282 ↛ 289: Copy with spilled destination, called directly ----
 
     def test_copy_spilled_destination_direct(self):
         from L0.register_allocation import _rewrite_spills_stmt  # type: ignore[attr-defined]
@@ -1140,7 +1066,6 @@ class TestCoverageGapsRound3:
         assert isinstance(result.then, L0.Store) # store tmp → slot
         assert result.then.base == slot_x
 
-    # ---- 347 ↛ 352: Address with non-spilled destination (else branch) ----
 
     def test_address_non_spilled_destination(self):
         from L0.register_allocation import _rewrite_spills_stmt  # type: ignore[attr-defined]
@@ -1157,10 +1082,6 @@ class TestCoverageGapsRound3:
         assert isinstance(result, L0.Address)
         assert result.destination == "ptr"
 
-
-# ---------------------------------------------------------------------------
-# Coverage gap tests round 4  (final 2 missing branches)
-# ---------------------------------------------------------------------------
 
 class TestCoverageGapsRound4:
 

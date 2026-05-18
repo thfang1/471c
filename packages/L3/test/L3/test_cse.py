@@ -4,10 +4,6 @@ from L3.syntax import (Abstract, Allocate, Apply, Begin, Branch, Immediate,
                        Let, Load, Primitive, Program, Reference, Store, Term)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _prog(body: Term, params: list[str] | None = None) -> Program:
     return Program(parameters=params or [], body=body)
 
@@ -15,10 +11,6 @@ def _prog(body: Term, params: list[str] | None = None) -> Program:
 def _opt(body: Term, params: list[str] | None = None) -> Term:
     return optimize_program(_prog(body, params)).body
 
-
-# ---------------------------------------------------------------------------
-# is_pure
-# ---------------------------------------------------------------------------
 
 class TestIsPure:
     def test_immediate(self):
@@ -67,10 +59,6 @@ class TestIsPure:
     def test_begin(self):
         assert not is_pure(Begin(effects=[], value=Immediate(value=0)))
 
-
-# ---------------------------------------------------------------------------
-# simplify
-# ---------------------------------------------------------------------------
 
 class TestSimplifyImmediate:
     def test_unchanged(self):
@@ -283,10 +271,6 @@ class TestSimplifyOther:
         assert simplify(t) == t
 
 
-# ---------------------------------------------------------------------------
-# cse
-# ---------------------------------------------------------------------------
-
 class TestCSE:
     def test_immediate_passthrough(self):
         assert cse(Immediate(value=1)) == Immediate(value=1)
@@ -393,10 +377,6 @@ class TestCSE:
         result = cse(Store(base=Reference(name="p"), index=0, value=Immediate(value=1)))
         assert isinstance(result, Store)
 
-
-# ---------------------------------------------------------------------------
-# optimize_program
-# ---------------------------------------------------------------------------
 
 class TestOptimizeProgram:
     def test_constant_folded(self):

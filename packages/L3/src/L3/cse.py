@@ -5,20 +5,11 @@ from L3.syntax import (Abstract, Allocate, Apply, Begin, Branch, Identifier,
                        Immediate, Let, Load, Primitive, Program, Reference,
                        Store, Term)
 
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
 type Env    = Mapping[Identifier, Term]   # name → Immediate | Reference
 type CSEEnv = Mapping[Term, Identifier]   # pure expr → canonical binding name
 
 
-# ---------------------------------------------------------------------------
-# Purity
-# ---------------------------------------------------------------------------
-
 def is_pure(term: Term) -> bool:
-    """True if term has no side effects and is safe to hoist / deduplicate."""
     match term:
         case Immediate() | Reference():
             return True
@@ -28,17 +19,7 @@ def is_pure(term: Term) -> bool:
             return False
 
 
-# ---------------------------------------------------------------------------
-# Pass 1: constant folding + copy propagation
-# ---------------------------------------------------------------------------
-
 def simplify(term: Term, env: Env = {}) -> Term:
-    """
-    Single-pass constant folding and copy propagation.
-
-    *env* maps variable names to their known values (Immediate or Reference).
-    Immediates enable constant folding; References enable copy propagation.
-    """
     recur = partial(simplify, env=env)
 
     match term:
@@ -122,20 +103,7 @@ def simplify(term: Term, env: Env = {}) -> Term:
             raise ValueError(f"Unknown term: {term!r}")
 
 
-# ---------------------------------------------------------------------------
-# Pass 2: common subexpression elimination
-# ---------------------------------------------------------------------------
-
 def _cse_term(term: Term, table: dict[Term, Identifier]) -> Term:
-    """
-    Traverse *term*, replacing duplicate pure subexpressions with a reference
-    to the first binding that computed them.
-
-    *table* maps a seen pure expression to the binding name that holds its
-    value.  The table is threaded through sequential bindings so that later
-    bindings can reuse earlier ones.  Each lambda body gets a *fresh* table
-    so we never hoist across a lambda boundary.
-    """
     recur = partial(_cse_term, table=table)
 
     match term:
@@ -198,26 +166,10 @@ def _cse_term(term: Term, table: dict[Term, Identifier]) -> Term:
 
 
 def cse(term: Term) -> Term:
-    """Entry point: run CSE on *term* with a fresh expression table."""
     return _cse_term(term, {})
 
 
-# ---------------------------------------------------------------------------
-# Optimization loop
-# ---------------------------------------------------------------------------
-
 def optimize_program(program: Program) -> Program:
-    """
-    Iterate CSE → simplify (constant folding + copy propagation) until the
-    term stops changing.
-
-    CSE runs first to surface duplicate computations as copy bindings;
-    simplify then eliminates those copies and folds any newly constant
-    expressions.  Dead bindings produced by copy propagation are removed
-    because simplify propagates references, making the original binding
-    unused — the existing DCE pass (or a subsequent simplify iteration)
-    will then drop it.
-    """
     current = program.body
     while True:
         after_cse      = cse(current)
