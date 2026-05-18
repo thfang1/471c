@@ -1,37 +1,53 @@
+from collections.abc import Callable, Mapping
+from functools import partial
+
 from L3.syntax import (Abstract, Allocate, Apply, Begin, Branch, Identifier,
-                        Immediate, Let, Load, Primitive, Program,
-                        Reference, Store, Term)
+                       Immediate, Let, LetRec, Load, Primitive, Program,
+                       Reference, Store, Term)
+from L3.uniqify import uniqify_term
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+type Env = Mapping[Identifier, Abstract]   # name → known function definition
 
 
-DEFAULT_SIZE_THRESHOLD = 5
+# ---------------------------------------------------------------------------
+# Size measurement
+# ---------------------------------------------------------------------------
 
-
-def ast_size(term: Term) -> int:
-    """Count the number of AST nodes in a term."""
+def size(term: Term) -> int:
+    """Count the number of AST nodes in *term*."""
     match term:
         case Immediate() | Reference() | Allocate():
             return 1
         case Primitive(left=l, right=r):
-            return 1 + ast_size(l) + ast_size(r)
+            return 1 + size(l) + size(r)
         case Abstract(body=b):
-            return 1 + ast_size(b)
+            return 1 + size(b)
         case Apply(target=t, arguments=args):
-            return 1 + ast_size(t) + sum(ast_size(a) for a in args)
+            return 1 + size(t) + sum(size(a) for a in args)
         case Let(bindings=bs, body=b):
-            return 1 + sum(ast_size(v) for _, v in bs) + ast_size(b)
+            return 1 + sum(size(v) for _, v in bs) + size(b)
+        case LetRec(bindings=bs, body=b):
+            return 1 + sum(size(v) for _, v in bs) + size(b)
         case Branch(left=l, right=r, consequent=c, otherwise=o):
-            return 1 + ast_size(l) + ast_size(r) + ast_size(c) + ast_size(o)
-        case Begin(effects=es, value=v):
-            return 1 + sum(ast_size(e) for e in es) + ast_size(v)
+            return 1 + size(l) + size(r) + size(c) + size(o)
         case Load(base=b):
-            return 1 + ast_size(b)
+            return 1 + size(b)
         case Store(base=b, value=v):
-            return 1 + ast_size(b) + ast_size(v)
-        case _:  # pragma: no cover
-            return 1
+            return 1 + size(b) + size(v)
+        case Begin(effects=es, value=v):  # pragma: no branch
+            return 1 + sum(size(e) for e in es) + size(v)
 
 
-def count_uses(name: str, term: Term) -> int:
+# ---------------------------------------------------------------------------
+# Use counting
+# ---------------------------------------------------------------------------
+
+def count_uses(name: Identifier, term: Term) -> int:
+    """Count how many times *name* appears as a Reference in *term*."""
     match term:
         case Reference(name=n):
             return 1 if n == name else 0
@@ -39,344 +55,200 @@ def count_uses(name: str, term: Term) -> int:
             return 0
         case Primitive(left=l, right=r):
             return count_uses(name, l) + count_uses(name, r)
-        case Abstract(parameters=ps, body=b):
-            if name in ps:
-                return 0
+        case Abstract(body=b):
             return count_uses(name, b)
         case Apply(target=t, arguments=args):
             return count_uses(name, t) + sum(count_uses(name, a) for a in args)
         case Let(bindings=bs, body=b):
-            total = 0
-            for n, v in bs:
-                total += count_uses(name, v)
-                if n == name:
-                    return total  # shadowed from here on
-            return total + count_uses(name, b)
+            return sum(count_uses(name, v) for _, v in bs) + count_uses(name, b)
+        case LetRec(bindings=bs, body=b):
+            return sum(count_uses(name, v) for _, v in bs) + count_uses(name, b)
         case Branch(left=l, right=r, consequent=c, otherwise=o):
-            return (count_uses(name, l) + count_uses(name, r) +
-                    count_uses(name, c) + count_uses(name, o))
-        case Begin(effects=es, value=v):
-            return sum(count_uses(name, e) for e in es) + count_uses(name, v)
+            return (count_uses(name, l) + count_uses(name, r)
+                    + count_uses(name, c) + count_uses(name, o))
         case Load(base=b):
             return count_uses(name, b)
         case Store(base=b, value=v):
             return count_uses(name, b) + count_uses(name, v)
-        case _:  # pragma: no cover
-            return 0
+        case Begin(effects=es, value=v):  # pragma: no branch
+            return sum(count_uses(name, e) for e in es) + count_uses(name, v)
 
-
-def uniqify(term: Term, env: dict[str, str], counter: list[int]) -> Term:
-    def fresh(name: str) -> str:
-        idx = counter[0]
-        counter[0] += 1
-        return f"{name}_{idx}"
-
-    match term:
-        case Immediate() | Allocate():
-            return term
-
-        case Reference(name=n):
-            return Reference(name=env.get(n, n))
-
-        case Primitive(operator=op, left=l, right=r):
-            return Primitive(
-                operator=op,
-                left=uniqify(l, env, counter),
-                right=uniqify(r, env, counter)
-            )
-
-        case Abstract(parameters=ps, body=b):
-            new_env = dict(env)
-            new_ps: list[str] = []
-            for p in ps:
-                fp = fresh(p)
-                new_env[p] = fp
-                new_ps.append(fp)
-            return Abstract(
-                parameters=tuple(new_ps),
-                body=uniqify(b, new_env, counter)
-            )
-
-        case Apply(target=t, arguments=args):
-            return Apply(
-                target=uniqify(t, env, counter),
-                arguments=tuple(uniqify(a, env, counter) for a in args)
-            )
-
-        case Let(bindings=bs, body=b):
-            new_env = dict(env)
-            new_bs: list[tuple[Identifier, Term]] = []
-            for n, v in bs:
-                s_v = uniqify(v, new_env, counter)
-                fn = fresh(n)
-                new_env[n] = fn
-                new_bs.append((fn, s_v))
-            return Let(
-                bindings=tuple(new_bs),
-                body=uniqify(b, new_env, counter)
-            )
-
-        case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
-            return Branch(
-                operator=op,
-                left=uniqify(l, env, counter),
-                right=uniqify(r, env, counter),
-                consequent=uniqify(c, env, counter),
-                otherwise=uniqify(o, env, counter)
-            )
-
-        case Begin(effects=es, value=v):
-            return Begin(
-                effects=tuple(uniqify(e, env, counter) for e in es),
-                value=uniqify(v, env, counter)
-            )
-
-        case Load(base=b, index=i):
-            return Load(base=uniqify(b, env, counter), index=i)
-
-        case Store(base=b, index=i, value=v):
-            return Store(
-                base=uniqify(b, env, counter),
-                index=i,
-                value=uniqify(v, env, counter)
-            )
-
-        case _:  # pragma: no cover
-            raise ValueError(f"Unhandled term in uniqify: {term!r}")
-
-def uniqify_program(term: Term) -> Term:
-    return uniqify(term, {}, [0])
 
 # ---------------------------------------------------------------------------
-# Substitution
+# Inlining eligibility
 # ---------------------------------------------------------------------------
 
-def substitute(term: Term, env: dict[str, Term]) -> Term:
-    match term:
-        case Immediate() | Allocate():
-            return term
-
-        case Reference(name=n):
-            return env.get(n, term)
-
-        case Primitive(operator=op, left=l, right=r):
-            return Primitive(
-                operator=op,
-                left=substitute(l, env),
-                right=substitute(r, env)
-            )
-
-        case Abstract(parameters=ps, body=b):
-            inner_env = {k: v for k, v in env.items() if k not in ps}
-            return Abstract(parameters=ps, body=substitute(b, inner_env))
-
-        case Apply(target=t, arguments=args):
-            return Apply(
-                target=substitute(t, env),
-                arguments=tuple(substitute(a, env) for a in args)
-            )
-
-        case Let(bindings=bs, body=b):
-            new_env = dict(env)
-            new_bs: list[tuple[Identifier, Term]] = []
-            for n, v in bs:
-                new_bs.append((n, substitute(v, new_env)))
-                new_env.pop(n, None)
-            return Let(
-                bindings=tuple(new_bs),
-                body=substitute(b, new_env)
-            )
-
-        case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
-            return Branch(
-                operator=op,
-                left=substitute(l, env),
-                right=substitute(r, env),
-                consequent=substitute(c, env),
-                otherwise=substitute(o, env)
-            )
-
-        case Begin(effects=es, value=v):
-            return Begin(
-                effects=tuple(substitute(e, env) for e in es),
-                value=substitute(v, env)
-            )
-
-        case Load(base=b, index=i):
-            return Load(base=substitute(b, env), index=i)
-
-        case Store(base=b, index=i, value=v):
-            return Store(
-                base=substitute(b, env),
-                index=i,
-                value=substitute(v, env)
-            )
-
-        case _:  # pragma: no cover
-            raise ValueError(f"Unhandled term in substitute: {term!r}")
+def is_eligible(
+    name: Identifier,
+    func: Abstract,
+    body: Term,
+    threshold: int,
+) -> bool:
+    """
+    A binding (name = func) is eligible for inlining if:
+      - the function body is below *threshold* nodes (small-function heuristic), or
+      - *name* is used exactly once in *body* (single-use heuristic).
+    """
+    return size(func.body) <= threshold or count_uses(name, body) == 1
 
 
-def inline(term: Term, size_threshold: int = DEFAULT_SIZE_THRESHOLD) -> Term:
-    match term:
-        case Immediate() | Reference() | Allocate():
-            return term
+# ---------------------------------------------------------------------------
+# Substitution  (beta reduction)
+# ---------------------------------------------------------------------------
 
-        case Let(bindings=bs, body=b):
-            new_bs: list[tuple[Identifier, Term]] = []
-            for n, v in bs:
-                new_bs.append((n, inline(v, size_threshold)))
-
-            # Build environment of functions eligible for inlining
-            inline_env: dict[str, Abstract] = {}
-            for n, v in new_bs:
-                if not isinstance(v, Abstract):
-                    continue
-                body_size = ast_size(v.body)
-                uses = count_uses(n, b)
-                if uses == 1 or body_size <= size_threshold:
-                    inline_env[n] = v
-
-            inlined_body = inline(b, size_threshold)
-            inlined_body = _apply_inline_env(inlined_body, inline_env, size_threshold)
-
-            return Let(bindings=tuple(new_bs), body=inlined_body)
-
-        case Abstract(parameters=ps, body=b):
-            return Abstract(parameters=ps, body=inline(b, size_threshold))
-
-        case Apply(target=t, arguments=args):
-            return Apply(
-                target=inline(t, size_threshold),
-                arguments=tuple(inline(a, size_threshold) for a in args)
-            )
-
-        case Primitive(operator=op, left=l, right=r):
-            return Primitive(
-                operator=op,
-                left=inline(l, size_threshold),
-                right=inline(r, size_threshold)
-            )
-
-        case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
-            return Branch(
-                operator=op,
-                left=inline(l, size_threshold),
-                right=inline(r, size_threshold),
-                consequent=inline(c, size_threshold),
-                otherwise=inline(o, size_threshold)
-            )
-
-        case Begin(effects=es, value=v):
-            return Begin(
-                effects=tuple(inline(e, size_threshold) for e in es),
-                value=inline(v, size_threshold)
-            )
-
-        case Load(base=b, index=i):
-            return Load(base=inline(b, size_threshold), index=i)
-
-        case Store(base=b, index=i, value=v):
-            return Store(
-                base=inline(b, size_threshold),
-                index=i,
-                value=inline(v, size_threshold)
-            )
-
-        case _:  # pragma: no cover
-            raise ValueError(f"Unhandled term in inline: {term!r}")
-
-
-def _apply_inline_env(
-    term: Term,
-    inline_env: dict[str, Abstract],
-    size_threshold: int,
+def substitute(
+    params: tuple[Identifier, ...],
+    args: tuple[Term, ...],
+    body: Term,
+    fresh: Callable[[str], str],
 ) -> Term:
+    """
+    Inline a call by wrapping the function body in let-bindings that bind
+    each parameter to the corresponding argument, then uniqifying to avoid
+    variable capture.
+
+      (lambda (p0 p1 ...) body) applied to (a0 a1 ...)
+      =>  (let ([p0 a0] [p1 a1] ...) body)
+
+    Uniqification runs immediately after to freshen all bound names.
+    """
+    let: Term = Let(
+        bindings=tuple(zip(params, args)),
+        body=body,
+    )
+    return uniqify_term(let, {}, fresh)
+
+
+# ---------------------------------------------------------------------------
+# Inlining pass
+# ---------------------------------------------------------------------------
+
+def inline_term(
+    term: Term,
+    env: Env,
+    fresh: Callable[[str], str],
+    threshold: int,
+) -> Term:
+    """
+    Traverse *term* substituting eligible call sites with the function body.
+
+    *env*       : currently in-scope let-bound functions
+    *fresh*     : name generator for uniqification after substitution
+    *threshold* : size limit for small-function inlining (inclusive)
+    """
+    recur = partial(inline_term, env=env, fresh=fresh, threshold=threshold)
+
     match term:
         case Immediate() | Reference() | Allocate():
             return term
 
-        case Apply(target=Reference(name=n), arguments=args) if n in inline_env:
-            func = inline_env[n]
-            result: Term = func.body
-            for param, arg in reversed(list(zip(func.parameters, args))):
-                result = Let(
-                    bindings=((param, _apply_inline_env(arg, inline_env, size_threshold)),),
-                    body=result
-                )
-            return result
+        case Let(bindings=bs, body=body):
+            new_env   = dict(env)
+            new_bindings: list[tuple[Identifier, Term]] = []
+
+            for name, val in bs:
+                inlined_val = recur(val)
+                # register as a known function if eligible for future call sites
+                if isinstance(inlined_val, Abstract):
+                    new_env[name] = inlined_val
+                new_bindings.append((name, inlined_val))
+
+            new_body = inline_term(body, new_env, fresh, threshold)
+
+            # drop bindings whose name was a function eligible for inlining
+            # and is no longer referenced (all call sites replaced)
+            kept: list[tuple[Identifier, Term]] = []
+            for name, val in new_bindings:
+                if (isinstance(val, Abstract)
+                        and name in new_env
+                        and is_eligible(name, val, new_body, threshold)
+                        and count_uses(name, new_body) == 0):
+                    pass   # fully inlined — drop the binding
+                else:
+                    kept.append((name, val))
+
+            if not kept:
+                return new_body
+            return Let(bindings=tuple(kept), body=new_body)
+
+        case LetRec(bindings=bs, body=body):
+            # do not inline across letrec — recursive functions need care
+            new_bindings = [(n, recur(v)) for n, v in bs]
+            return LetRec(
+                bindings=tuple(new_bindings),
+                body=recur(body),
+            )
+
+        case Apply(target=Reference(name=name), arguments=args):
+            inlined_args = tuple(recur(a) for a in args)
+            if name in env:
+                func = env[name]
+                if (len(func.parameters) == len(inlined_args)
+                        and is_eligible(name, func, term, threshold)):
+                    return substitute(
+                        tuple(func.parameters),
+                        inlined_args,
+                        func.body,
+                        fresh,
+                    )
+            return Apply(
+                target=Reference(name=name),
+                arguments=inlined_args,
+            )
 
         case Apply(target=t, arguments=args):
             return Apply(
-                target=_apply_inline_env(t, inline_env, size_threshold),
-                arguments=tuple(_apply_inline_env(a, inline_env, size_threshold) for a in args)
-            )
-
-        case Primitive(operator=op, left=l, right=r):
-            return Primitive(
-                operator=op,
-                left=_apply_inline_env(l, inline_env, size_threshold),
-                right=_apply_inline_env(r, inline_env, size_threshold)
-            )
-
-        case Let(bindings=bs, body=b): # pragma: no branch
-            return Let(
-                bindings=tuple((n, _apply_inline_env(v, inline_env, size_threshold)) for n, v in bs),
-                body=_apply_inline_env(b, inline_env, size_threshold)
+                target=recur(t),
+                arguments=tuple(recur(a) for a in args),
             )
 
         case Abstract(parameters=ps, body=b):
-            return Abstract(
-                parameters=ps,
-                body=_apply_inline_env(b, inline_env, size_threshold)
-            )
+            # functions defined inside lambdas are not visible outside —
+            # give each lambda a fresh env scope
+            return Abstract(parameters=ps, body=inline_term(b, {}, fresh, threshold))
+
+        case Primitive(operator=op, left=l, right=r):
+            return Primitive(operator=op, left=recur(l), right=recur(r))
 
         case Branch(operator=op, left=l, right=r, consequent=c, otherwise=o):
             return Branch(
                 operator=op,
-                left=_apply_inline_env(l, inline_env, size_threshold),
-                right=_apply_inline_env(r, inline_env, size_threshold),
-                consequent=_apply_inline_env(c, inline_env, size_threshold),
-                otherwise=_apply_inline_env(o, inline_env, size_threshold)
-            )
-
-        case Begin(effects=es, value=v):
-            return Begin(
-                effects=tuple(_apply_inline_env(e, inline_env, size_threshold) for e in es),
-                value=_apply_inline_env(v, inline_env, size_threshold)
+                left=recur(l),
+                right=recur(r),
+                consequent=recur(c),
+                otherwise=recur(o),
             )
 
         case Load(base=b, index=i):
-            return Load(base=_apply_inline_env(b, inline_env, size_threshold), index=i)
+            return Load(base=recur(b), index=i)
 
         case Store(base=b, index=i, value=v):
-            return Store(
-                base=_apply_inline_env(b, inline_env, size_threshold),
-                index=i,
-                value=_apply_inline_env(v, inline_env, size_threshold)
+            return Store(base=recur(b), index=i, value=recur(v))
+
+        case Begin(effects=es, value=v):  # pragma: no branch
+            return Begin(
+                effects=tuple(recur(e) for e in es),
+                value=recur(v),
             )
 
-        case _:  # pragma: no cover
-            raise ValueError(f"Unhandled term in _apply_inline_env: {term!r}")
 
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
 
 def inline_program(
-    term: Term,
-    size_threshold: int = DEFAULT_SIZE_THRESHOLD,
-) -> Term:
-    return uniqify_program(inline(term, size_threshold))
-
-
-def optimize_program(
     program: Program,
-    size_threshold: int = DEFAULT_SIZE_THRESHOLD,
+    fresh: Callable[[str], str],
+    threshold: int = 5,
 ) -> Program:
-    current = program.body
-    while True:
-        after = inline(current, size_threshold)
-        if after == current:
-            break
-        current = after
-    return Program(parameters=program.parameters, body=uniqify_program(current))
+    """
+    Run one pass of function inlining over *program*.
+
+    *threshold* controls the small-function heuristic: any function whose
+    body has at most *threshold* AST nodes is inlined at every call site.
+    Set threshold=0 to disable small-function inlining (only single-use
+    functions are inlined).  Set threshold to a large value to inline
+    everything.
+    """
+    new_body = inline_term(program.body, {}, fresh, threshold)
+    return Program(parameters=program.parameters, body=new_body)
